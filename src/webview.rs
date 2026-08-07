@@ -394,7 +394,13 @@ impl<T: UserEvent> WinitCefApp<T> {
       height: bounds.size.height,
     };
 
+    // Alloy style has no drag-and-drop implementation for windowed rendering, so HTML5
+    // drags never start. Chrome style routes through Chrome's Views/Aura browser, which
+    // installs a drag-drop client. It cannot be parented natively on macOS (CEF #3294).
+    #[cfg(target_os = "macos")]
     let cef_runtime_style = cef::RuntimeStyle::ALLOY;
+    #[cfg(not(target_os = "macos"))]
+    let cef_runtime_style = cef::RuntimeStyle::CHROME;
 
     let mut window_info = cef::WindowInfo::default().set_as_child(parent, &bounds);
     window_info.runtime_style = cef_runtime_style;
