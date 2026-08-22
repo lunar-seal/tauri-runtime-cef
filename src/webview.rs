@@ -305,6 +305,13 @@ impl<T: UserEvent> WinitCefApp<T> {
     *live_browsers += 1;
     appwindow.children.push(child);
     layout_app_window(appwindow);
+    // No winit focus event is coming for a window that is already focused.
+    if appwindow.reported_focus
+      && let Some(child) = appwindow.children.last()
+    {
+      child.host.set_focus(1);
+      child.take_input_focus();
+    }
     Ok(())
   }
 
@@ -628,7 +635,10 @@ impl<T: UserEvent> WinitCefApp<T> {
         };
         child.set_bounds(parent_size, scale, new_bounds);
       }
-      WebviewMessage::SetFocus => child.host.set_focus(1),
+      WebviewMessage::SetFocus => {
+        child.host.set_focus(1);
+        child.take_input_focus();
+      }
       WebviewMessage::Url(tx) => {
         let url = child.url().unwrap_or_default();
         let _ = tx.send(Ok(url));

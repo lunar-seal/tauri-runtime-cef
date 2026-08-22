@@ -629,6 +629,48 @@ impl<T: UserEvent> WinitCefApp<T> {
     }
   }
 
+  /// The browser child window owns the X11 input focus while the app is focused,
+  /// which X11 reports to the top-level as `FocusOut`/`NotifyInferior`. winit
+  /// does not filter that detail, so its focus state alone is not usable.
+  fn sync_window_focus(&mut self, window_id: WindowId) {
+    let Some(appwindow) = self.state.windows.get_mut(&window_id) else {
+      return;
+    };
+
+    let focused = appwindow.window.has_focus() || appwindow.owns_input_focus();
+    if focused == appwindow.reported_focus {
+      return;
+    }
+    appwindow.reported_focus = focused;
+
+    for child in &appwindow.children {
+      child.host.set_focus(i32::from(focused));
+    }
+    if focused {
+      if let Some(child) = appwindow.children.first() {
+        child.take_input_focus();
+      }
+    }
+
+    self.emit_window_event(window_id, WindowEvent::Focused(focused));
+  }
+
+  /// winit already considers the top-level unfocused once the browser child holds
+  /// the focus, so it drops the `FocusOut` for a real loss. The loop still wakes.
+  fn sync_delegated_focus(&mut self) {
+    let delegated = self
+      .state
+      .windows
+      .iter()
+      .filter(|(_, appwindow)| appwindow.reported_focus && !appwindow.window.has_focus())
+      .map(|(window_id, _)| *window_id)
+      .collect::<Vec<_>>();
+
+    for window_id in delegated {
+      self.sync_window_focus(window_id);
+    }
+  }
+
   fn emit_window_event(&mut self, window_id: WindowId, event: WindowEvent) {
     let Some(appwindow) = self.state.windows.get(&window_id) else {
       return;
@@ -857,6 +899,7 @@ impl<T: UserEvent> ApplicationHandler for WinitCefApp<T> {
       target_os = "openbsd"
     ))]
     self.service_glib(event_loop);
+    self.sync_delegated_focus();
     self.run_callback(RunEvent::MainEventsCleared);
   }
 
@@ -908,12 +951,7 @@ impl<T: UserEvent> ApplicationHandler for WinitCefApp<T> {
           WindowEvent::Moved(PhysicalPosition::new(pos.x, pos.y)),
         );
       }
-      WinitWindowEvent::Focused(focused) => {
-        for child in &appwindow.children {
-          child.host.set_focus(i32::from(focused));
-        }
-        self.emit_window_event(window_id, WindowEvent::Focused(focused));
-      }
+      WinitWindowEvent::Focused(_) => self.sync_window_focus(window_id),
       WinitWindowEvent::ThemeChanged(theme) => {
         let system_theme = winit_theme_to_tauri_theme(theme);
         if let Some(explicit_theme) = appwindow.preferred_theme() {

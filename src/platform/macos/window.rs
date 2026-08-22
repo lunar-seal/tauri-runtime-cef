@@ -24,6 +24,11 @@ use crate::window::AppWindow;
 use super::{AppkitState, utils};
 
 impl AppWindow {
+  pub(crate) fn owns_input_focus(&self) -> bool {
+    let _ = self;
+    false
+  }
+
   pub(crate) fn raw_cef_handle(&self) -> cef::sys::cef_window_handle_t {
     let nsview = self.nsview();
     Retained::as_ptr(&nsview).cast_mut().cast()

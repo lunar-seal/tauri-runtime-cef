@@ -17,6 +17,10 @@ use windows::Win32::{
 use crate::{webview::AppWebview, window::AppWindow};
 
 impl AppWebview {
+  pub(crate) fn take_input_focus(&self) {
+    let _ = self;
+  }
+
   pub(crate) fn hwnd(&self) -> HWND {
     let hwnd = self.host.window_handle();
     HWND(hwnd.0 as _)

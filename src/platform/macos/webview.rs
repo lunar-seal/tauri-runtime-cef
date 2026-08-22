@@ -14,6 +14,10 @@ use crate::{webview::AppWebview, window::AppWindow};
 use super::utils;
 
 impl AppWebview {
+  pub(crate) fn take_input_focus(&self) {
+    let _ = self;
+  }
+
   pub(crate) fn nsview(&self) -> Retained<NSView> {
     let handle = self.host.window_handle();
     let view = handle.cast::<NSView>();

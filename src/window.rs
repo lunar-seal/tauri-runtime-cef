@@ -329,6 +329,8 @@ pub(crate) struct AppWindow {
   pub(crate) attrs: AppWindowAttrs,
   pub(crate) children: Vec<AppWebview>,
   pub(crate) listeners: WindowEventListeners,
+  /// Last focus state reported to Tauri. See `WinitCefApp::sync_window_focus`.
+  pub(crate) reported_focus: bool,
   #[cfg(target_os = "macos")]
   pub(crate) appkit_state: Arc<RwLock<AppkitState>>,
 }
@@ -441,6 +443,7 @@ impl<T: UserEvent> WinitCefApp<T> {
       attrs,
       children: Vec::new(),
       listeners: Default::default(),
+      reported_focus: false,
       #[cfg(target_os = "macos")]
       appkit_state: Arc::new(RwLock::new(AppkitState::default())),
     };
