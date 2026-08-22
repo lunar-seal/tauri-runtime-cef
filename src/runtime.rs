@@ -1404,6 +1404,12 @@ impl<T: UserEvent> CefRuntime<T> {
     let mut command_line_args = cef_config.command_line_args.clone();
     let deep_link_schemes = cef_config.deep_link_schemes.clone();
 
+    // Once the GPU mode fallback list is exhausted Chromium kills the browser
+    // process with a `LOG(FATAL)`, seen as a bare "Illegal instruction" with no
+    // panic and no log. Suspend/resume GPU resets get there on their own.
+    // See `GpuDataManagerImplPrivate::FallBackToNextGpuMode`.
+    command_line_args.push(("disable-gpu-process-crash-limit".to_string(), None));
+
     let cache_path = cef_config.cache_path.clone().unwrap_or_else(|| {
       let cache_base = dirs::cache_dir().unwrap_or_else(std::env::temp_dir);
       cache_base.join(&cef_config.identifier).join("cef")
