@@ -397,6 +397,16 @@ pub(crate) struct WinitCefApp<T: UserEvent> {
   exit_code: Arc<std::sync::atomic::AtomicI32>,
 }
 
+/// Stands in for the scheduling callbacks `external_message_pump` would provide.
+#[cfg(any(
+  target_os = "linux",
+  target_os = "dragonfly",
+  target_os = "freebsd",
+  target_os = "netbsd",
+  target_os = "openbsd"
+))]
+const CEF_WORK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(4);
+
 impl<T: UserEvent> WinitCefApp<T> {
   fn new(
     context: RuntimeContext<T>,
@@ -841,11 +851,10 @@ impl<T: UserEvent> WinitCefApp<T> {
     }
   }
 
-  /// Service the default GLib main context so the external message pump's GLib
-  /// timeout (and any GTK work CEF schedules) gets dispatched, then arm winit to
-  /// wake when the next tick is due. CEF is driven by that timeout firing, not
-  /// from here. Windows/macOS need no equivalent: their pump timers live on the
-  /// native loop winit already runs.
+  /// Without `external_message_pump` nothing tells us when Chromium has work, so
+  /// poll it. The GLib iteration only covers GTK work CEF schedules itself:
+  /// `MessagePumpGlib`'s sources return early unless the pump is inside `Run()`,
+  /// which only `do_message_loop_work` enters.
   #[cfg(any(
     target_os = "linux",
     target_os = "dragonfly",
@@ -858,9 +867,11 @@ impl<T: UserEvent> WinitCefApp<T> {
     while context.pending() {
       context.iteration(false);
     }
-    if let Some(deadline) = self.context.cef_pump.next_deadline() {
-      event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(deadline));
-    }
+
+    cef::do_message_loop_work();
+    event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
+      std::time::Instant::now() + CEF_WORK_INTERVAL,
+    ));
   }
 }
 
@@ -1494,10 +1505,30 @@ impl<T: UserEvent> CefRuntime<T> {
       "CEF browser process unexpectedly returned from execute_process"
     );
 
+    // CEF's `MessagePumpExternal::Run` is a 10ms time slice with a no-op `Quit`,
+    // so nested run loops end immediately. HTML5 drag and native context menus
+    // both need one that lasts. Chromium's `MessagePumpGlib` is a real loop.
+    #[cfg(any(
+      target_os = "linux",
+      target_os = "dragonfly",
+      target_os = "freebsd",
+      target_os = "netbsd",
+      target_os = "openbsd"
+    ))]
+    const EXTERNAL_MESSAGE_PUMP: i32 = 0;
+    #[cfg(not(any(
+      target_os = "linux",
+      target_os = "dragonfly",
+      target_os = "freebsd",
+      target_os = "netbsd",
+      target_os = "openbsd"
+    )))]
+    const EXTERNAL_MESSAGE_PUMP: i32 = 1;
+
     let settings = cef::Settings {
       no_sandbox: !cfg!(feature = "sandbox") as i32,
       cache_path: cache_path.to_string_lossy().to_string().as_str().into(),
-      external_message_pump: 1,
+      external_message_pump: EXTERNAL_MESSAGE_PUMP,
       // Comma-delimited; empty keeps CEF's http/https-only default. The
       // defaults stay included because exclude_defaults is left 0.
       cookieable_schemes_list: cef_config.cookieable_schemes.join(",").as_str().into(),
