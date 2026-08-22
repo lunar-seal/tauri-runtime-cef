@@ -395,6 +395,14 @@ pub(crate) struct WinitCefApp<T: UserEvent> {
   /// Exit code from `RequestExit`, read back by `Runtime::run_return` after
   /// the event loop finishes (winit's `run_app` return carries no code).
   exit_code: Arc<std::sync::atomic::AtomicI32>,
+  #[cfg(any(
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd"
+  ))]
+  last_focus_probe: Option<std::time::Instant>,
 }
 
 /// Stands in for the scheduling callbacks `external_message_pump` would provide.
@@ -406,6 +414,16 @@ pub(crate) struct WinitCefApp<T: UserEvent> {
   target_os = "openbsd"
 ))]
 const CEF_WORK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(4);
+
+/// Probing costs blocking X round-trips and focus is not that time-sensitive.
+#[cfg(any(
+  target_os = "linux",
+  target_os = "dragonfly",
+  target_os = "freebsd",
+  target_os = "netbsd",
+  target_os = "openbsd"
+))]
+const FOCUS_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(150);
 
 impl<T: UserEvent> WinitCefApp<T> {
   fn new(
@@ -427,6 +445,14 @@ impl<T: UserEvent> WinitCefApp<T> {
       },
       scheme_registry,
       exit_code,
+      #[cfg(any(
+        target_os = "linux",
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd"
+      ))]
+      last_focus_probe: None,
     }
   }
 
@@ -668,6 +694,23 @@ impl<T: UserEvent> WinitCefApp<T> {
   /// winit already considers the top-level unfocused once the browser child holds
   /// the focus, so it drops the `FocusOut` for a real loss. The loop still wakes.
   fn sync_delegated_focus(&mut self) {
+    #[cfg(any(
+      target_os = "linux",
+      target_os = "dragonfly",
+      target_os = "freebsd",
+      target_os = "netbsd",
+      target_os = "openbsd"
+    ))]
+    {
+      let now = std::time::Instant::now();
+      if let Some(last) = self.last_focus_probe
+        && now.duration_since(last) < FOCUS_PROBE_INTERVAL
+      {
+        return;
+      }
+      self.last_focus_probe = Some(now);
+    }
+
     let delegated = self
       .state
       .windows
