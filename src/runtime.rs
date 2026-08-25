@@ -53,6 +53,8 @@ use crate::{
 };
 #[cfg(target_os = "macos")]
 use winit::platform::macos::EventLoopBuilderExtMacOS;
+#[cfg(target_os = "linux")]
+use winit::platform::wayland::EventLoopBuilderExtWayland;
 #[cfg(windows)]
 use winit::platform::windows::EventLoopBuilderExtWindows;
 #[cfg(any(
@@ -258,6 +260,8 @@ pub(crate) type AfterWindowCreationCallback = Box<dyn for<'a> Fn(RawWindow<'a>) 
 pub(crate) enum Message<T: UserEvent> {
   EventLoop(EventLoopMessage),
   BrowserClosed(WindowId, u32),
+  #[cfg(target_os = "linux")]
+  NativeWaylandWindow(WindowId, crate::native_wayland::Event),
   Opened(Vec<url::Url>),
   #[cfg(target_os = "macos")]
   Reopen {
@@ -512,6 +516,10 @@ impl<T: UserEvent> WinitCefApp<T> {
         self.state.live_browsers = self.state.live_browsers.saturating_sub(1);
         self.exit_if_done(event_loop);
       }
+      #[cfg(target_os = "linux")]
+      Message::NativeWaylandWindow(window_id, event) => {
+        self.handle_native_wayland_event(window_id, event, event_loop)
+      }
       Message::CreateWindow {
         window_id,
         webview_id,
@@ -694,6 +702,11 @@ impl<T: UserEvent> WinitCefApp<T> {
   /// winit already considers the top-level unfocused once the browser child holds
   /// the focus, so it drops the `FocusOut` for a real loss. The loop still wakes.
   fn sync_delegated_focus(&mut self) {
+    #[cfg(target_os = "linux")]
+    if crate::config::native_wayland() {
+      return;
+    }
+
     #[cfg(any(
       target_os = "linux",
       target_os = "dragonfly",
@@ -721,6 +734,51 @@ impl<T: UserEvent> WinitCefApp<T> {
 
     for window_id in delegated {
       self.sync_window_focus(window_id);
+    }
+  }
+
+  #[cfg(target_os = "linux")]
+  fn handle_native_wayland_event(
+    &mut self,
+    window_id: WindowId,
+    event: crate::native_wayland::Event,
+    event_loop: &dyn ActiveEventLoop,
+  ) {
+    match event {
+      crate::native_wayland::Event::CloseRequested => {
+        self.request_window_close(window_id, event_loop)
+      }
+      crate::native_wayland::Event::Destroyed => {
+        self.close_window(window_id, event_loop);
+      }
+      crate::native_wayland::Event::Focused(focused) => {
+        let Some(appwindow) = self.state.windows.get_mut(&window_id) else {
+          return;
+        };
+        if appwindow.reported_focus != focused {
+          appwindow.reported_focus = focused;
+          for child in &appwindow.children {
+            child.host.set_focus(i32::from(focused));
+          }
+          if focused && let Some(child) = appwindow.children.first() {
+            child.take_input_focus();
+          }
+          self.emit_window_event(window_id, WindowEvent::Focused(focused));
+        }
+      }
+      crate::native_wayland::Event::Resized(size) => {
+        self.emit_window_event(window_id, WindowEvent::Resized(size));
+      }
+      crate::native_wayland::Event::ScaleFactorChanged {
+        scale_factor,
+        new_inner_size,
+      } => self.emit_window_event(
+        window_id,
+        WindowEvent::ScaleFactorChanged {
+          scale_factor,
+          new_inner_size,
+        },
+      ),
     }
   }
 
@@ -813,7 +871,7 @@ impl<T: UserEvent> WinitCefApp<T> {
     // shutdown drain is still enforced by live_browsers.
     for child in &appwindow.children {
       self.remove_scheme_handler_entries(child);
-      child.host.close_browser(1);
+      child.close();
     }
     self.exit_if_done(event_loop);
   }
@@ -862,7 +920,7 @@ impl<T: UserEvent> WinitCefApp<T> {
     for appwindow in self.state.windows.values() {
       for child in &appwindow.children {
         self.remove_scheme_handler_entries(child);
-        child.host.close_browser(1);
+        child.close();
       }
     }
     self.state.windows.clear();
@@ -1486,9 +1544,19 @@ impl<T: UserEvent> CefRuntime<T> {
       ));
     }
 
-    // Force X11 usage on Linux
+    #[cfg(target_os = "linux")]
+    match cef_config.linux_windowing {
+      crate::LinuxWindowing::X11 => {
+        command_line_args.push(("ozone-platform".to_string(), Some("x11".to_string())));
+        event_loop_builder.with_x11();
+      }
+      crate::LinuxWindowing::Wayland => {
+        command_line_args.push(("ozone-platform".to_string(), Some("wayland".to_string())));
+        event_loop_builder.with_wayland();
+      }
+    }
+
     #[cfg(any(
-      target_os = "linux",
       target_os = "dragonfly",
       target_os = "freebsd",
       target_os = "netbsd",
@@ -1599,8 +1667,11 @@ impl<T: UserEvent> CefRuntime<T> {
     // Baseline for embedders that never touch GTK. One that calls `gtk_init`
     // must call `install_x_error_handlers` again afterwards — GTK's X11 backend
     // replaces the handler during init.
+    #[cfg(target_os = "linux")]
+    if !crate::config::native_wayland() {
+      crate::platform::linux::install_x_error_handlers();
+    }
     #[cfg(any(
-      target_os = "linux",
       target_os = "dragonfly",
       target_os = "freebsd",
       target_os = "openbsd",
@@ -1674,6 +1745,13 @@ impl<T: UserEvent> Runtime<T> for CefRuntime<T> {
   ))]
   fn new_any_thread(args: RuntimeInitArgs) -> Result<Self> {
     let mut event_loop_builder = EventLoopBuilder::default();
+    #[cfg(target_os = "linux")]
+    if crate::config::native_wayland() {
+      EventLoopBuilderExtWayland::with_any_thread(&mut event_loop_builder, true);
+    } else {
+      EventLoopBuilderExtX11::with_any_thread(&mut event_loop_builder, true);
+    }
+    #[cfg(not(target_os = "linux"))]
     event_loop_builder.with_any_thread(true);
     Self::init(event_loop_builder, args)
   }

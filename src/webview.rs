@@ -198,6 +198,8 @@ pub(crate) struct AppWebview {
   pub(crate) devtools_observer_registration: Arc<Mutex<Option<cef::Registration>>>,
   pub(crate) listeners: WebviewEventListeners,
   pub(crate) bounds_rate: Option<BoundsRate>,
+  #[cfg(target_os = "linux")]
+  pub(crate) native_wayland: Option<crate::native_wayland::NativeWindow>,
 }
 
 impl AppWebview {
@@ -229,6 +231,11 @@ impl AppWebview {
   pub(crate) fn set_visible(&self, visible: bool) {
     self.host.was_hidden(if visible { 0 } else { 1 });
     self.apply_visible(visible);
+  }
+
+  pub(crate) fn close(&self) {
+    self.host.close_browser(1);
+    self.destroy_native();
   }
 
   pub fn url(&self) -> Option<String> {
@@ -280,6 +287,21 @@ impl<T: UserEvent> WinitCefApp<T> {
     drag_drop_event_target: browser_client::DragDropEventTarget,
     pending: PendingWebview<T, CefRuntime<T>>,
   ) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    if crate::config::native_wayland() && !appwindow.children.is_empty() {
+      return Err(Error::CreateWebview(
+        "native Wayland supports one webview in its single top-level window"
+          .to_string()
+          .into(),
+      ));
+    }
+    #[cfg(target_os = "linux")]
+    let parent = if crate::config::native_wayland() {
+      Default::default()
+    } else {
+      appwindow.raw_cef_handle()
+    };
+    #[cfg(not(target_os = "linux"))]
     let parent = appwindow.raw_cef_handle();
     let parent_size = appwindow.window.surface_size();
     let scale = appwindow.window.scale_factor();
@@ -295,6 +317,16 @@ impl<T: UserEvent> WinitCefApp<T> {
       scale,
       theme,
       drag_drop_event_target,
+      #[cfg(target_os = "linux")]
+      crate::config::native_wayland().then(|| {
+        crate::native_wayland::WindowConfig::new(
+          context,
+          appwindow.id,
+          &appwindow.attrs,
+          parent_size,
+          scale,
+        )
+      }),
       pending,
     ) else {
       return Err(Error::CreateWebview(
@@ -325,6 +357,7 @@ impl<T: UserEvent> WinitCefApp<T> {
     scale: f64,
     theme: Option<Theme>,
     drag_drop_event_target: browser_client::DragDropEventTarget,
+    #[cfg(target_os = "linux")] native_wayland: Option<crate::native_wayland::WindowConfig>,
     mut pending: PendingWebview<T, CefRuntime<T>>,
   ) -> Option<AppWebview> {
     let bounds_rate = compute_child_bounds_rate(
@@ -438,6 +471,78 @@ impl<T: UserEvent> WinitCefApp<T> {
         // Create with an inert document so the BrowserHost exists before the real
         // navigation; the real URL is loaded once the document-start script is set.
         let initial_url = CefString::from(INITIAL_LOAD_URL);
+        let finish_browser = move |browser: Browser, #[cfg(target_os = "linux")] native_wayland| {
+          let Some(host) = browser.host() else {
+            log::error!("CEF browser for webview {label:?} has no host");
+            return;
+          };
+          let browser_id = browser.identifier();
+
+          {
+            let mut registry = scheme_registry.lock().unwrap();
+            for (scheme, handler) in uri_scheme_protocols.iter() {
+              registry.insert(
+                (browser_id, scheme.clone()),
+                (
+                  label.clone(),
+                  handler.clone(),
+                  initialization_scripts.clone(),
+                ),
+              );
+            }
+          }
+
+          let devtools_protocol_handlers = Arc::new(Mutex::new(Vec::new()));
+          let pending_initial_loads: PendingInitialLoads = Arc::new(Mutex::new(HashMap::new()));
+          let devtools_observer_registration = Arc::new(Mutex::new(add_dev_tools_observer(
+            &browser,
+            devtools_protocol_handlers.clone(),
+            pending_initial_loads.clone(),
+          )));
+          load_initial_url_after_registering_initialization_scripts(
+            &browser,
+            &initialization_scripts,
+            &custom_protocol_scheme,
+            &custom_scheme_domain_names,
+            &real_initial_url,
+            &pending_initial_loads,
+          );
+
+          browser_tx
+            .send(AppWebview {
+              webview_id,
+              label,
+              browser,
+              browser_id,
+              host,
+              uri_scheme_protocols,
+              devtools_protocol_handlers,
+              devtools_observer_registration,
+              listeners: Default::default(),
+              bounds_rate,
+              #[cfg(target_os = "linux")]
+              native_wayland,
+            })
+            .expect("failed to send initialized CEF browser");
+        };
+
+        #[cfg(target_os = "linux")]
+        if let Some(native_wayland) = native_wayland {
+          if crate::native_wayland::create(
+            &mut client,
+            &initial_url,
+            &settings,
+            request_context.as_mut(),
+            native_wayland,
+            Box::new(move |browser, window| finish_browser(browser, Some(window))),
+          )
+          .is_none()
+          {
+            log::error!("failed to create native Wayland CEF window");
+          }
+          return;
+        }
+
         let Some(browser) = cef::browser_host_create_browser_sync(
           Some(&window_info),
           Some(&mut client),
@@ -446,59 +551,14 @@ impl<T: UserEvent> WinitCefApp<T> {
           None,
           request_context.as_mut(),
         ) else {
-          log::error!("failed to create CEF browser for webview {label:?}");
+          log::error!("failed to create CEF browser");
           return;
         };
-        let Some(host) = browser.host() else {
-          log::error!("CEF browser for webview {label:?} has no host");
-          return;
-        };
-        let browser_id = browser.identifier();
-
-        {
-          let mut registry = scheme_registry.lock().unwrap();
-          for (scheme, handler) in uri_scheme_protocols.iter() {
-            registry.insert(
-              (browser_id, scheme.clone()),
-              (
-                label.clone(),
-                handler.clone(),
-                initialization_scripts.clone(),
-              ),
-            );
-          }
-        }
-
-        let devtools_protocol_handlers = Arc::new(Mutex::new(Vec::new()));
-        let pending_initial_loads: PendingInitialLoads = Arc::new(Mutex::new(HashMap::new()));
-        let devtools_observer_registration = Arc::new(Mutex::new(add_dev_tools_observer(
-          &browser,
-          devtools_protocol_handlers.clone(),
-          pending_initial_loads.clone(),
-        )));
-        load_initial_url_after_registering_initialization_scripts(
-          &browser,
-          &initialization_scripts,
-          &custom_protocol_scheme,
-          &custom_scheme_domain_names,
-          &real_initial_url,
-          &pending_initial_loads,
+        finish_browser(
+          browser,
+          #[cfg(target_os = "linux")]
+          None,
         );
-
-        browser_tx
-          .send(AppWebview {
-            webview_id,
-            label,
-            browser,
-            browser_id,
-            host,
-            uri_scheme_protocols,
-            devtools_protocol_handlers,
-            devtools_observer_registration,
-            listeners: Default::default(),
-            bounds_rate,
-          })
-          .expect("failed to send initialized CEF browser");
       }
     });
     let request_context = request_context::request_context_from_webview_attributes(
@@ -517,7 +577,7 @@ impl<T: UserEvent> WinitCefApp<T> {
     // `None` here means browser creation failed (or the request context never
     // initialized); the continuation logs the reason. Soft-fail instead of
     // taking down the whole process.
-    browser_rx.recv().ok()
+    request_context::wait_for_deferred_result(&browser_rx)
   }
 
   pub(crate) fn handle_webview_message(
@@ -603,12 +663,11 @@ impl<T: UserEvent> WinitCefApp<T> {
       // callback can race parent-window bookkeeping. Window/app teardown already
       // uses force_close=true; standalone child close needs the same semantics.
       WebviewMessage::Close => {
-        child.host.close_browser(1);
         // Windowed CEF browsers are not destroyed by CloseBrowser alone: the
         // native child hierarchy must also be torn down before OnBeforeClose
         // runs. Leaving it attached leaks the renderer; letting CEF forward a
         // close to its top-level parent can close the whole Tauri window.
-        child.destroy_native();
+        child.close();
       }
       WebviewMessage::SetBounds(bounds) => {
         let parent_size = appwindow.window.surface_size();
@@ -1228,6 +1287,14 @@ impl<T: UserEvent> WebviewDispatch<T> for CefWebviewDispatcher<T> {
 /// from the current window size; children with fixed bounds keep whatever bounds
 /// they were last given.
 pub(crate) fn layout_app_window(appwindow: &AppWindow) {
+  #[cfg(target_os = "linux")]
+  if appwindow
+    .children
+    .first()
+    .is_some_and(|child| child.native_wayland.is_some())
+  {
+    return;
+  }
   let parent_size = appwindow.window.surface_size();
   let win_w = parent_size.width as f32;
   let win_h = parent_size.height as f32;

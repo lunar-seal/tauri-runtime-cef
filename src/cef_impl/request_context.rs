@@ -8,6 +8,7 @@ use std::{
   sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
+    mpsc::{Receiver, TryRecvError},
   },
   time::Duration,
 };
@@ -167,6 +168,24 @@ pub(crate) fn wait_for_deferred_init(flag: &Arc<AtomicBool>) {
   } else {
     while !flag.load(Ordering::SeqCst) {
       std::thread::sleep(Duration::from_millis(1));
+    }
+  }
+}
+
+/// Wait for an asynchronously-created CEF object while continuing to service
+/// the CEF UI thread. Views creates its browser only after the BrowserView is
+/// attached to a Window, unlike `browser_host_create_browser_sync`.
+pub(crate) fn wait_for_deferred_result<T>(receiver: &Receiver<T>) -> Option<T> {
+  if cef::currently_on(cef::sys::cef_thread_id_t::TID_UI.into()) == 0 {
+    return receiver.recv().ok();
+  }
+
+  let _allow = AllowNestableTasks::enter();
+  loop {
+    match receiver.try_recv() {
+      Ok(value) => return Some(value),
+      Err(TryRecvError::Disconnected) => return None,
+      Err(TryRecvError::Empty) => cef::do_message_loop_work(),
     }
   }
 }

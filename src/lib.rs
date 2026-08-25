@@ -9,6 +9,8 @@ mod cef_impl;
 mod compat;
 mod config;
 mod external_message_pump;
+#[cfg(target_os = "linux")]
+mod native_wayland;
 mod platform;
 mod policy;
 mod runtime;
@@ -18,7 +20,7 @@ mod window;
 mod window_builder;
 mod window_handle;
 
-pub use config::{CefConfig, configure};
+pub use config::{CefConfig, LinuxWindowing, configure};
 #[cfg(any(
   target_os = "linux",
   target_os = "dragonfly",

@@ -32,6 +32,21 @@ fn main() {
 
 Because published tauri only defaults its generic types (`AppHandle`, `WebviewWindow`, …) to wry, apps alias them once (`type AppHandle = tauri::AppHandle<Cef>;`) and build tauri with `default-features = false`.
 
+On Linux, native Wayland can be selected before startup:
+
+```rust
+tauri_runtime_cef::configure(tauri_runtime_cef::CefConfig {
+    linux_windowing: tauri_runtime_cef::LinuxWindowing::Wayland,
+    ..Default::default()
+});
+```
+
+This is a parallel CEF Views path: CEF owns the single visible top-level and its
+browser view. X11 remains the default and compiled fallback, but the runtime does
+not open an X display connection in Wayland mode. Native Wayland currently supports
+one window with one full-window webview; Linux raw window handles and runtime
+decoration/constraint changes are unavailable in this mode.
+
 ## Additions
 
 Capabilities this crate adds on top of the imported runtime:
@@ -94,7 +109,7 @@ How building against published tauri changes the mechanics, relative to the feat
 
 ## Known ceilings
 
-- Verified on Linux (X11). The macOS/Windows paths compile-ported blind — they need a real pass.
+- Verified on Linux (X11 and native Wayland). The macOS/Windows paths compile-ported blind — they need a real pass.
 - macOS `.app` bundling needs the CEF framework + helper-app layout that feat/cef's tauri-cli produces; the published CLI doesn't do this. Bundle scripting lives with the consuming app for now.
 - Deep-link relaunch URLs are dropped on Linux/Windows (published `tauri-runtime` has no `RunEvent::Opened` there).
 

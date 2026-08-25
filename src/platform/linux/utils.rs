@@ -16,7 +16,13 @@ const CLIENT_MESSAGE: i32 = 33;
 const SUBSTRUCTURE_REDIRECT_MASK: c_long = 1 << 20;
 const SUBSTRUCTURE_NOTIFY_MASK: c_long = 1 << 19;
 
-static XLIB: LazyLock<Option<xlib::Xlib>> = LazyLock::new(|| xlib::Xlib::open().ok());
+static XLIB: LazyLock<Option<xlib::Xlib>> = LazyLock::new(|| {
+  #[cfg(target_os = "linux")]
+  if crate::config::native_wayland() {
+    return None;
+  }
+  xlib::Xlib::open().ok()
+});
 
 struct Display(*mut xlib::Display);
 
