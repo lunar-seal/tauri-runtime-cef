@@ -97,6 +97,11 @@ x11-dl = "2.21"
 default = ["sandbox"]
 devtools = []
 macos-private-api = ["tauri-runtime/macos-private-api"]
+# Linux CEF Views/Ozone-Wayland windowing path (`LinuxWindowing::Wayland`).
+# Off by default: unlike the X11 embedding path, it owns a single top-level
+# window with a single full-window webview, has no raw window handles, and
+# can't change decorations at runtime. Opt in once an app needs it.
+native-wayland = []
 sandbox = ["cef/sandbox"]
 
 [dev-dependencies]

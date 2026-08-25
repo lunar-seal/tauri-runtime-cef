@@ -198,7 +198,7 @@ pub(crate) struct AppWebview {
   pub(crate) devtools_observer_registration: Arc<Mutex<Option<cef::Registration>>>,
   pub(crate) listeners: WebviewEventListeners,
   pub(crate) bounds_rate: Option<BoundsRate>,
-  #[cfg(target_os = "linux")]
+  #[cfg(all(target_os = "linux", feature = "native-wayland"))]
   pub(crate) native_wayland: Option<crate::native_wayland::NativeWindow>,
 }
 
@@ -317,7 +317,7 @@ impl<T: UserEvent> WinitCefApp<T> {
       scale,
       theme,
       drag_drop_event_target,
-      #[cfg(target_os = "linux")]
+      #[cfg(all(target_os = "linux", feature = "native-wayland"))]
       crate::config::native_wayland().then(|| {
         crate::native_wayland::WindowConfig::new(
           context,
@@ -357,7 +357,9 @@ impl<T: UserEvent> WinitCefApp<T> {
     scale: f64,
     theme: Option<Theme>,
     drag_drop_event_target: browser_client::DragDropEventTarget,
-    #[cfg(target_os = "linux")] native_wayland: Option<crate::native_wayland::WindowConfig>,
+    #[cfg(all(target_os = "linux", feature = "native-wayland"))] native_wayland: Option<
+      crate::native_wayland::WindowConfig,
+    >,
     mut pending: PendingWebview<T, CefRuntime<T>>,
   ) -> Option<AppWebview> {
     let bounds_rate = compute_child_bounds_rate(
@@ -366,8 +368,12 @@ impl<T: UserEvent> WinitCefApp<T> {
       parent_size,
       scale,
     );
+    #[cfg_attr(
+      not(all(target_os = "linux", feature = "native-wayland")),
+      allow(unused_mut)
+    )]
     let mut initialization_scripts = initialization_scripts(&mut pending.webview_attributes);
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "native-wayland"))]
     if native_wayland
       .as_ref()
       .is_some_and(crate::native_wayland::WindowConfig::is_frameless)
@@ -421,11 +427,11 @@ impl<T: UserEvent> WinitCefApp<T> {
       drag_drop_event_target,
       drag_drop_handler_enabled,
       drag_drop_state,
-      #[cfg(target_os = "linux")]
+      #[cfg(all(target_os = "linux", feature = "native-wayland"))]
       native_wayland
         .as_ref()
         .map(crate::native_wayland::WindowConfig::draggable_regions_changed),
-      #[cfg(not(target_os = "linux"))]
+      #[cfg(not(all(target_os = "linux", feature = "native-wayland")))]
       None,
       handlers,
       context.proxy.clone(),
@@ -486,7 +492,12 @@ impl<T: UserEvent> WinitCefApp<T> {
         // Create with an inert document so the BrowserHost exists before the real
         // navigation; the real URL is loaded once the document-start script is set.
         let initial_url = CefString::from(INITIAL_LOAD_URL);
-        let finish_browser = move |browser: Browser, #[cfg(target_os = "linux")] native_wayland| {
+        let finish_browser = move |browser: Browser,
+                                   #[cfg(all(
+          target_os = "linux",
+          feature = "native-wayland"
+        ))]
+                                   native_wayland| {
           let Some(host) = browser.host() else {
             log::error!("CEF browser for webview {label:?} has no host");
             return;
@@ -535,13 +546,13 @@ impl<T: UserEvent> WinitCefApp<T> {
               devtools_observer_registration,
               listeners: Default::default(),
               bounds_rate,
-              #[cfg(target_os = "linux")]
+              #[cfg(all(target_os = "linux", feature = "native-wayland"))]
               native_wayland,
             })
             .expect("failed to send initialized CEF browser");
         };
 
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", feature = "native-wayland"))]
         if let Some(native_wayland) = native_wayland {
           if crate::native_wayland::create(
             &mut client,
@@ -571,7 +582,7 @@ impl<T: UserEvent> WinitCefApp<T> {
         };
         finish_browser(
           browser,
-          #[cfg(target_os = "linux")]
+          #[cfg(all(target_os = "linux", feature = "native-wayland"))]
           None,
         );
       }
@@ -1302,7 +1313,7 @@ impl<T: UserEvent> WebviewDispatch<T> for CefWebviewDispatcher<T> {
 /// from the current window size; children with fixed bounds keep whatever bounds
 /// they were last given.
 pub(crate) fn layout_app_window(appwindow: &AppWindow) {
-  #[cfg(target_os = "linux")]
+  #[cfg(all(target_os = "linux", feature = "native-wayland"))]
   if appwindow
     .children
     .first()

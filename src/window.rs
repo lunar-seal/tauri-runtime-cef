@@ -566,7 +566,7 @@ impl<T: UserEvent> WinitCefApp<T> {
     let Some(appwindow) = self.state.windows.get_mut(&window_id) else {
       return;
     };
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "native-wayland"))]
     let Some(message) = crate::native_wayland::handle_window_message(appwindow, message) else {
       return;
     };

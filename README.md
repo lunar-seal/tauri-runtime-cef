@@ -32,7 +32,9 @@ fn main() {
 
 Because published tauri only defaults its generic types (`AppHandle`, `WebviewWindow`, …) to wry, apps alias them once (`type AppHandle = tauri::AppHandle<Cef>;`) and build tauri with `default-features = false`.
 
-On Linux, native Wayland can be selected before startup:
+On Linux, native Wayland can be selected before startup — this is opt-in via the
+`native-wayland` crate feature (`tauri-runtime-cef = { ..., features = ["native-wayland"] }`),
+which also gates `LinuxWindowing::Wayland` itself:
 
 ```rust
 tauri_runtime_cef::configure(tauri_runtime_cef::CefConfig {

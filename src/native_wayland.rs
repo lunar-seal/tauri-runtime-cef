@@ -325,11 +325,11 @@ pub(crate) fn handle_window_message(
     WindowMessage::SetVisibleOnAllWorkspaces(_) | WindowMessage::SetContentProtected(_) => {}
     WindowMessage::SetSize(size) => window.set_size(Some(&cef_size_from_tauri(size, scale))),
     WindowMessage::SetMinSize(size) => {
-      appwindow.attrs.inner.min_surface_size = size.clone();
+      appwindow.attrs.inner.min_surface_size = size;
       native.state.lock().unwrap().min_size = size;
     }
     WindowMessage::SetMaxSize(size) => {
-      appwindow.attrs.inner.max_surface_size = size.clone();
+      appwindow.attrs.inner.max_surface_size = size;
       native.state.lock().unwrap().max_size = size;
     }
     WindowMessage::SetSizeConstraints(constraints) => {
@@ -337,8 +337,8 @@ pub(crate) fn handle_window_message(
         crate::window::paired_size_constraint(constraints.min_width, constraints.min_height);
       let max_size =
         crate::window::paired_size_constraint(constraints.max_width, constraints.max_height);
-      appwindow.attrs.inner.min_surface_size = min_size.clone();
-      appwindow.attrs.inner.max_surface_size = max_size.clone();
+      appwindow.attrs.inner.min_surface_size = min_size;
+      appwindow.attrs.inner.max_surface_size = max_size;
       let mut state = native.state.lock().unwrap();
       state.min_size = min_size;
       state.max_size = max_size;
@@ -475,7 +475,6 @@ wrap_window_delegate! {
         .lock()
         .unwrap()
         .min_size
-        .clone()
         .map(|size| cef_size_from_tauri(size, view_scale_factor(view, self.config.initial_scale_factor)))
         .unwrap_or_default()
     }
@@ -487,7 +486,6 @@ wrap_window_delegate! {
         .lock()
         .unwrap()
         .max_size
-        .clone()
         .map(|size| cef_size_from_tauri(size, view_scale_factor(view, self.config.initial_scale_factor)))
         .unwrap_or_default()
     }

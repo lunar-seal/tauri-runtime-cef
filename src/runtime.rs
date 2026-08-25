@@ -260,7 +260,7 @@ pub(crate) type AfterWindowCreationCallback = Box<dyn for<'a> Fn(RawWindow<'a>) 
 pub(crate) enum Message<T: UserEvent> {
   EventLoop(EventLoopMessage),
   BrowserClosed(WindowId, u32),
-  #[cfg(target_os = "linux")]
+  #[cfg(all(target_os = "linux", feature = "native-wayland"))]
   NativeWaylandWindow(WindowId, crate::native_wayland::Event),
   Opened(Vec<url::Url>),
   #[cfg(target_os = "macos")]
@@ -516,7 +516,7 @@ impl<T: UserEvent> WinitCefApp<T> {
         self.state.live_browsers = self.state.live_browsers.saturating_sub(1);
         self.exit_if_done(event_loop);
       }
-      #[cfg(target_os = "linux")]
+      #[cfg(all(target_os = "linux", feature = "native-wayland"))]
       Message::NativeWaylandWindow(window_id, event) => {
         self.handle_native_wayland_event(window_id, event, event_loop)
       }
@@ -737,7 +737,7 @@ impl<T: UserEvent> WinitCefApp<T> {
     }
   }
 
-  #[cfg(target_os = "linux")]
+  #[cfg(all(target_os = "linux", feature = "native-wayland"))]
   fn handle_native_wayland_event(
     &mut self,
     window_id: WindowId,
@@ -1550,6 +1550,7 @@ impl<T: UserEvent> CefRuntime<T> {
         command_line_args.push(("ozone-platform".to_string(), Some("x11".to_string())));
         event_loop_builder.with_x11();
       }
+      #[cfg(feature = "native-wayland")]
       crate::LinuxWindowing::Wayland => {
         command_line_args.push(("ozone-platform".to_string(), Some("wayland".to_string())));
         event_loop_builder.with_wayland();

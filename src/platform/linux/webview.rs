@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-License-Identifier: MIT
 
-use cef::{ImplBrowserHost, ImplView};
+use cef::ImplBrowserHost;
+#[cfg(feature = "native-wayland")]
+use cef::ImplView;
 use std::os::raw::c_ulong;
 use tauri_runtime::dpi::{PhysicalPosition, PhysicalSize, Rect};
 use tauri_utils::config::Color;
@@ -20,6 +22,7 @@ impl AppWebview {
   }
 
   pub(crate) fn set_background_color(&self, color: Option<Color>) {
+    #[cfg(feature = "native-wayland")]
     if let Some(native) = &self.native_wayland {
       let (r, g, b, a) = color.unwrap_or_default().into();
       native.browser_view.set_background_color(
@@ -33,6 +36,7 @@ impl AppWebview {
   }
 
   pub(crate) fn bounds(&self) -> Option<Rect> {
+    #[cfg(feature = "native-wayland")]
     if let Some(native) = &self.native_wayland {
       let bounds = native.browser_view.bounds();
       let scale = native.scale_factor();
@@ -89,6 +93,7 @@ impl AppWebview {
   /// with neither focus nor pointer as inactive. Alloy does this in
   /// `CefWindowX11::Focus`; Chrome-style child windows have no equivalent.
   pub(crate) fn take_input_focus(&self) {
+    #[cfg(feature = "native-wayland")]
     if let Some(native) = &self.native_wayland {
       native.browser_view.request_focus();
       return;
@@ -109,6 +114,7 @@ impl AppWebview {
   }
 
   pub(crate) fn reparent(&self, parent: &AppWindow) {
+    #[cfg(feature = "native-wayland")]
     if self.native_wayland.is_some() {
       return;
     }
@@ -122,6 +128,7 @@ impl AppWebview {
   }
 
   pub(crate) fn apply_visible(&self, visible: bool) {
+    #[cfg(feature = "native-wayland")]
     if let Some(native) = &self.native_wayland {
       native.browser_view.set_visible(i32::from(visible));
       return;
@@ -162,6 +169,7 @@ impl AppWebview {
   }
 
   pub(crate) fn destroy_native(&self) {
+    #[cfg(feature = "native-wayland")]
     if let Some(native) = &self.native_wayland {
       native.force_close();
       return;
@@ -174,6 +182,7 @@ impl AppWebview {
   }
 
   pub(crate) fn apply_physical_bounds(&self, _scale: f64, x: i32, y: i32, width: i32, height: i32) {
+    #[cfg(feature = "native-wayland")]
     if let Some(native) = &self.native_wayland {
       let scale = native.scale_factor();
       native.browser_view.set_bounds(Some(&cef::Rect {

@@ -28,7 +28,9 @@ use std::sync::OnceLock;
 pub enum LinuxWindowing {
   #[default]
   X11,
-  /// A CEF Views-owned top-level window using Ozone/Wayland.
+  /// A CEF Views-owned top-level window using Ozone/Wayland. Requires the
+  /// `native-wayland` crate feature.
+  #[cfg(feature = "native-wayland")]
   Wayland,
 }
 
@@ -91,5 +93,12 @@ pub(crate) fn config() -> &'static CefConfig {
 
 #[cfg(target_os = "linux")]
 pub(crate) fn native_wayland() -> bool {
-  config().linux_windowing == LinuxWindowing::Wayland
+  #[cfg(feature = "native-wayland")]
+  {
+    config().linux_windowing == LinuxWindowing::Wayland
+  }
+  #[cfg(not(feature = "native-wayland"))]
+  {
+    false
+  }
 }

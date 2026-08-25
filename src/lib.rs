@@ -9,7 +9,7 @@ mod cef_impl;
 mod compat;
 mod config;
 mod external_message_pump;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "native-wayland"))]
 mod native_wayland;
 mod platform;
 mod policy;
