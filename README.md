@@ -45,7 +45,13 @@ This is a parallel CEF Views path: CEF owns the single visible top-level and its
 browser view. X11 remains the default and compiled fallback, but the runtime does
 not open an X display connection in Wayland mode. Native Wayland currently supports
 one window with one full-window webview; Linux raw window handles and runtime
-decoration/constraint changes are unavailable in this mode.
+decoration changes are unavailable in this mode. Creation-time frameless windows
+support Tauri drag regions; size constraints and resizable/maximizable/minimizable/
+closable state are forwarded to the CEF window delegate.
+
+CEF's Chrome password manager and this crate's permission policy use the same
+request-context and browser-client paths on X11 and Wayland; non-incognito
+profiles use the same persistent cache path.
 
 ## Additions
 

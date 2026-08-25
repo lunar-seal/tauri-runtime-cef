@@ -17,6 +17,7 @@ use cef::{rc::Rc, *};
 use tauri_runtime::{
   Error, UserEvent,
   dpi::{PhysicalPosition, PhysicalSize, Size as TauriSize},
+  webview::InitializationScript,
   window::WindowId,
 };
 use winit::window::WindowLevel;
@@ -28,6 +29,76 @@ use crate::{
 
 type BrowserCreated = Box<dyn FnOnce(Browser, NativeWindow)>;
 type Emit = Arc<dyn Fn(Event) + Send + Sync>;
+
+const DRAG_REGION_SCRIPT: &str = r#"
+(() => {
+  const style = document.createElement("style");
+  style.textContent = `
+    [data-tauri-drag-region]:not([data-tauri-drag-region="false"]) {
+      -webkit-app-region: drag;
+    }
+    [data-tauri-drag-region]:not([data-tauri-drag-region="deep"]) * {
+      -webkit-app-region: no-drag;
+    }
+    [data-tauri-drag-region="false"],
+    [data-tauri-drag-region="deep"] :is(a, button, input, select, textarea, label, summary,
+      [contenteditable]:not([contenteditable="false"]), [tabindex]:not([tabindex="-1"]),
+      [role="button"], [role="link"], [role="menuitem"], [role="tab"], [role="checkbox"],
+      [role="radio"], [role="switch"], [role="option"]):not([data-tauri-drag-region]) {
+      -webkit-app-region: no-drag;
+    }
+  `;
+  (document.head || document.documentElement).append(style);
+})();
+"#;
+
+pub(crate) fn drag_region_initialization_script() -> InitializationScript {
+  InitializationScript {
+    script: DRAG_REGION_SCRIPT.to_string(),
+    for_main_frame_only: false,
+  }
+}
+
+#[derive(Default)]
+struct DraggableRegionsState {
+  window: Option<Window>,
+  regions: Vec<DraggableRegion>,
+}
+
+#[derive(Clone, Default)]
+struct DraggableRegions(Arc<Mutex<DraggableRegionsState>>);
+
+impl DraggableRegions {
+  fn attach(&self, window: Window) {
+    let regions = {
+      let mut state = self.0.lock().unwrap();
+      state.window = Some(window.clone());
+      state.regions.clone()
+    };
+    window.set_draggable_regions((!regions.is_empty()).then_some(regions.as_slice()));
+  }
+
+  fn set(&self, regions: Option<&[DraggableRegion]>) {
+    let (window, regions) = {
+      let mut state = self.0.lock().unwrap();
+      state.regions = regions.unwrap_or_default().to_vec();
+      (state.window.clone(), state.regions.clone())
+    };
+    if let Some(window) = window {
+      window.set_draggable_regions((!regions.is_empty()).then_some(regions.as_slice()));
+    }
+  }
+}
+
+#[derive(Clone)]
+struct WindowState {
+  resizable: bool,
+  maximizable: bool,
+  minimizable: bool,
+  closable: bool,
+  min_size: Option<TauriSize>,
+  max_size: Option<TauriSize>,
+}
 
 #[derive(Debug)]
 pub(crate) enum Event {
@@ -54,12 +125,12 @@ pub(crate) struct WindowConfig {
   show_state: ShowState,
   visible: bool,
   frameless: bool,
-  resizable: bool,
-  maximizable: bool,
-  minimizable: bool,
-  closable: bool,
+  always_on_top: bool,
+  initial_scale_factor: f64,
   app_id: String,
   emit: Emit,
+  state: Arc<Mutex<WindowState>>,
+  draggable_regions: DraggableRegions,
 }
 
 impl WindowConfig {
@@ -100,13 +171,31 @@ impl WindowConfig {
       show_state,
       visible: attrs.inner.visible,
       frameless: !attrs.inner.decorations,
-      resizable: attrs.inner.resizable,
-      maximizable: buttons.contains(winit::window::WindowButtons::MAXIMIZE),
-      minimizable: buttons.contains(winit::window::WindowButtons::MINIMIZE),
-      closable: buttons.contains(winit::window::WindowButtons::CLOSE),
+      always_on_top: attrs.inner.window_level == WindowLevel::AlwaysOnTop,
+      initial_scale_factor: scale_factor,
       app_id: crate::config::config().identifier.clone(),
       emit,
+      state: Arc::new(Mutex::new(WindowState {
+        resizable: attrs.inner.resizable,
+        maximizable: buttons.contains(winit::window::WindowButtons::MAXIMIZE),
+        minimizable: buttons.contains(winit::window::WindowButtons::MINIMIZE),
+        closable: buttons.contains(winit::window::WindowButtons::CLOSE),
+        min_size: attrs.inner.min_surface_size,
+        max_size: attrs.inner.max_surface_size,
+      })),
+      draggable_regions: DraggableRegions::default(),
     }
+  }
+
+  pub(crate) fn draggable_regions_changed(
+    &self,
+  ) -> crate::cef_impl::client::DraggableRegionsChanged {
+    let draggable_regions = self.draggable_regions.clone();
+    Arc::new(move |regions| draggable_regions.set(regions))
+  }
+
+  pub(crate) fn is_frameless(&self) -> bool {
+    self.frameless
   }
 }
 
@@ -115,6 +204,7 @@ pub(crate) struct NativeWindow {
   pub(crate) window: Window,
   pub(crate) browser_view: BrowserView,
   allow_close: Arc<AtomicBool>,
+  state: Arc<Mutex<WindowState>>,
 }
 
 impl NativeWindow {
@@ -185,22 +275,34 @@ pub(crate) fn handle_window_message(
     WindowMessage::Center => window.center_window(Some(&cef_size(outer_size, scale))),
     WindowMessage::RequestUserAttention(_) => {}
     WindowMessage::SetEnabled(enabled) => window.set_enabled(i32::from(enabled)),
-    WindowMessage::SetResizable(resizable) => appwindow.attrs.inner.resizable = resizable,
-    WindowMessage::SetMaximizable(enabled) => appwindow
-      .attrs
-      .inner
-      .enabled_buttons
-      .set(winit::window::WindowButtons::MAXIMIZE, enabled),
-    WindowMessage::SetMinimizable(enabled) => appwindow
-      .attrs
-      .inner
-      .enabled_buttons
-      .set(winit::window::WindowButtons::MINIMIZE, enabled),
-    WindowMessage::SetClosable(enabled) => appwindow
-      .attrs
-      .inner
-      .enabled_buttons
-      .set(winit::window::WindowButtons::CLOSE, enabled),
+    WindowMessage::SetResizable(resizable) => {
+      appwindow.attrs.inner.resizable = resizable;
+      native.state.lock().unwrap().resizable = resizable;
+    }
+    WindowMessage::SetMaximizable(enabled) => {
+      appwindow
+        .attrs
+        .inner
+        .enabled_buttons
+        .set(winit::window::WindowButtons::MAXIMIZE, enabled);
+      native.state.lock().unwrap().maximizable = enabled;
+    }
+    WindowMessage::SetMinimizable(enabled) => {
+      appwindow
+        .attrs
+        .inner
+        .enabled_buttons
+        .set(winit::window::WindowButtons::MINIMIZE, enabled);
+      native.state.lock().unwrap().minimizable = enabled;
+    }
+    WindowMessage::SetClosable(enabled) => {
+      appwindow
+        .attrs
+        .inner
+        .enabled_buttons
+        .set(winit::window::WindowButtons::CLOSE, enabled);
+      native.state.lock().unwrap().closable = enabled;
+    }
     WindowMessage::SetTitle(title) => {
       appwindow.attrs.inner.title = title.clone();
       window.set_title(Some(&CefString::from(title.as_str())));
@@ -210,7 +312,7 @@ pub(crate) fn handle_window_message(
     WindowMessage::Minimize => window.minimize(),
     WindowMessage::Show => window.show(),
     WindowMessage::Hide => window.hide(),
-    WindowMessage::SetDecorations(decorations) => appwindow.attrs.inner.decorations = decorations,
+    WindowMessage::SetDecorations(_) => {}
     WindowMessage::SetAlwaysOnBottom(_) => {}
     WindowMessage::SetAlwaysOnTop(on_top) => {
       appwindow.attrs.inner.window_level = if on_top {
@@ -223,16 +325,23 @@ pub(crate) fn handle_window_message(
     WindowMessage::SetVisibleOnAllWorkspaces(_) | WindowMessage::SetContentProtected(_) => {}
     WindowMessage::SetSize(size) => window.set_size(Some(&cef_size_from_tauri(size, scale))),
     WindowMessage::SetMinSize(size) => {
-      appwindow.attrs.inner.min_surface_size = size;
+      appwindow.attrs.inner.min_surface_size = size.clone();
+      native.state.lock().unwrap().min_size = size;
     }
     WindowMessage::SetMaxSize(size) => {
-      appwindow.attrs.inner.max_surface_size = size;
+      appwindow.attrs.inner.max_surface_size = size.clone();
+      native.state.lock().unwrap().max_size = size;
     }
     WindowMessage::SetSizeConstraints(constraints) => {
-      appwindow.attrs.inner.min_surface_size =
+      let min_size =
         crate::window::paired_size_constraint(constraints.min_width, constraints.min_height);
-      appwindow.attrs.inner.max_surface_size =
+      let max_size =
         crate::window::paired_size_constraint(constraints.max_width, constraints.max_height);
+      appwindow.attrs.inner.min_surface_size = min_size.clone();
+      appwindow.attrs.inner.max_surface_size = max_size.clone();
+      let mut state = native.state.lock().unwrap();
+      state.min_size = min_size;
+      state.max_size = max_size;
     }
     WindowMessage::SetPosition(_position) => {}
     WindowMessage::SetFullscreen(fullscreen) => window.set_fullscreen(i32::from(fullscreen)),
@@ -285,6 +394,8 @@ wrap_browser_view_delegate! {
   struct NativeBrowserViewDelegate {
     on_created: Arc<Mutex<Option<BrowserCreated>>>,
     allow_close: Arc<AtomicBool>,
+    state: Arc<Mutex<WindowState>>,
+    draggable_regions: DraggableRegions,
   }
 
   impl ViewDelegate {}
@@ -310,12 +421,14 @@ wrap_browser_view_delegate! {
           log::error!("native Wayland browser view has no CEF window");
           return;
         };
+        self.draggable_regions.attach(window.clone());
         on_created(
           browser.clone(),
           NativeWindow {
             window,
             browser_view: browser_view.clone(),
             allow_close: self.allow_close.clone(),
+            state: self.state.clone(),
           },
         );
       }
@@ -354,6 +467,30 @@ wrap_window_delegate! {
         height: self.config.bounds.height,
       }
     }
+
+    fn minimum_size(&self, view: Option<&mut View>) -> Size {
+      self
+        .config
+        .state
+        .lock()
+        .unwrap()
+        .min_size
+        .clone()
+        .map(|size| cef_size_from_tauri(size, view_scale_factor(view, self.config.initial_scale_factor)))
+        .unwrap_or_default()
+    }
+
+    fn maximum_size(&self, view: Option<&mut View>) -> Size {
+      self
+        .config
+        .state
+        .lock()
+        .unwrap()
+        .max_size
+        .clone()
+        .map(|size| cef_size_from_tauri(size, view_scale_factor(view, self.config.initial_scale_factor)))
+        .unwrap_or_default()
+    }
   }
 
   impl PanelDelegate {}
@@ -365,6 +502,7 @@ wrap_window_delegate! {
       let mut view = View::from(&self.browser_view);
       window.add_child_view(Some(&mut view));
       window.set_title(Some(&CefString::from(self.config.title.as_str())));
+      window.set_always_on_top(i32::from(self.config.always_on_top));
       if self.config.visible {
         window.show();
       }
@@ -410,21 +548,21 @@ wrap_window_delegate! {
     }
 
     fn can_resize(&self, _window: Option<&mut Window>) -> i32 {
-      i32::from(self.config.resizable)
+      i32::from(self.config.state.lock().unwrap().resizable)
     }
 
     fn can_maximize(&self, _window: Option<&mut Window>) -> i32 {
-      i32::from(self.config.maximizable)
+      i32::from(self.config.state.lock().unwrap().maximizable)
     }
 
     fn can_minimize(&self, _window: Option<&mut Window>) -> i32 {
-      i32::from(self.config.minimizable)
+      i32::from(self.config.state.lock().unwrap().minimizable)
     }
 
     fn can_close(&self, _window: Option<&mut Window>) -> i32 {
       if self.allow_close.load(Ordering::Acquire) {
         1
-      } else if !self.config.closable {
+      } else if !self.config.state.lock().unwrap().closable {
         0
       } else {
         (self.config.emit)(Event::CloseRequested);
@@ -457,8 +595,12 @@ pub(crate) fn create(
   on_created: BrowserCreated,
 ) -> Option<()> {
   let allow_close = Arc::new(AtomicBool::new(false));
-  let mut browser_delegate =
-    NativeBrowserViewDelegate::new(Arc::new(Mutex::new(Some(on_created))), allow_close.clone());
+  let mut browser_delegate = NativeBrowserViewDelegate::new(
+    Arc::new(Mutex::new(Some(on_created))),
+    allow_close.clone(),
+    config.state.clone(),
+    config.draggable_regions.clone(),
+  );
   let browser_view = browser_view_create(
     Some(client),
     Some(url),
@@ -490,4 +632,27 @@ fn scale_factor(window: &Window) -> f64 {
     .display()
     .map(|display| display.device_scale_factor() as f64)
     .unwrap_or(1.0)
+}
+
+fn view_scale_factor(view: Option<&mut View>, fallback: f64) -> f64 {
+  view
+    .and_then(|view| view.window())
+    .as_ref()
+    .map(scale_factor)
+    .unwrap_or(fallback)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use tauri_runtime::dpi::LogicalSize;
+
+  #[test]
+  fn cef_sizes_stay_in_device_independent_pixels() {
+    let physical = cef_size(PhysicalSize::new(300, 180), 1.5);
+    assert_eq!((physical.width, physical.height), (200, 120));
+
+    let logical = cef_size_from_tauri(TauriSize::Logical(LogicalSize::new(200.0, 120.0)), 1.5);
+    assert_eq!((logical.width, logical.height), (200, 120));
+  }
 }

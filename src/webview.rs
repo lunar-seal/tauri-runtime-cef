@@ -366,7 +366,16 @@ impl<T: UserEvent> WinitCefApp<T> {
       parent_size,
       scale,
     );
-    let initialization_scripts = initialization_scripts(&mut pending.webview_attributes);
+    let mut initialization_scripts = initialization_scripts(&mut pending.webview_attributes);
+    #[cfg(target_os = "linux")]
+    if native_wayland
+      .as_ref()
+      .is_some_and(crate::native_wayland::WindowConfig::is_frameless)
+    {
+      Arc::make_mut(&mut initialization_scripts).push(CefInitScript::new(
+        crate::native_wayland::drag_region_initialization_script(),
+      ));
+    }
     let uri_scheme_protocols: Arc<HashMap<_, _>> = Arc::new(
       pending
         .uri_scheme_protocols
@@ -412,6 +421,12 @@ impl<T: UserEvent> WinitCefApp<T> {
       drag_drop_event_target,
       drag_drop_handler_enabled,
       drag_drop_state,
+      #[cfg(target_os = "linux")]
+      native_wayland
+        .as_ref()
+        .map(crate::native_wayland::WindowConfig::draggable_regions_changed),
+      #[cfg(not(target_os = "linux"))]
+      None,
       handlers,
       context.proxy.clone(),
       context.sender.clone(),
