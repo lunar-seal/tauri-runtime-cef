@@ -328,6 +328,8 @@ pub(crate) struct AppWindow {
   pub(crate) window: Box<dyn WinitWindow>,
   pub(crate) attrs: AppWindowAttrs,
   pub(crate) children: Vec<AppWebview>,
+  #[cfg(all(target_os = "linux", feature = "native-wayland"))]
+  pub(crate) native_wayland: Option<crate::native_wayland::NativeWindow>,
   pub(crate) listeners: WindowEventListeners,
   /// Last focus state reported to Tauri. See `WinitCefApp::sync_window_focus`.
   pub(crate) reported_focus: bool,
@@ -456,6 +458,8 @@ impl<T: UserEvent> WinitCefApp<T> {
       window,
       attrs,
       children: Vec::new(),
+      #[cfg(all(target_os = "linux", feature = "native-wayland"))]
+      native_wayland: None,
       listeners: Default::default(),
       reported_focus: false,
       #[cfg(target_os = "macos")]

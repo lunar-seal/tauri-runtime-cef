@@ -407,6 +407,8 @@ pub(crate) struct WinitCefApp<T: UserEvent> {
     target_os = "openbsd"
   ))]
   last_focus_probe: Option<std::time::Instant>,
+  #[cfg(target_os = "linux")]
+  last_slow_cef_tick_log: Option<std::time::Instant>,
 }
 
 /// Stands in for the scheduling callbacks `external_message_pump` would provide.
@@ -418,6 +420,12 @@ pub(crate) struct WinitCefApp<T: UserEvent> {
   target_os = "openbsd"
 ))]
 const CEF_WORK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(4);
+
+#[cfg(target_os = "linux")]
+const SLOW_CEF_TICK: std::time::Duration = std::time::Duration::from_millis(8);
+
+#[cfg(target_os = "linux")]
+const SLOW_CEF_TICK_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Probing costs blocking X round-trips and focus is not that time-sensitive.
 #[cfg(any(
@@ -457,6 +465,8 @@ impl<T: UserEvent> WinitCefApp<T> {
         target_os = "openbsd"
       ))]
       last_focus_probe: None,
+      #[cfg(target_os = "linux")]
+      last_slow_cef_tick_log: None,
     }
   }
 
@@ -873,6 +883,8 @@ impl<T: UserEvent> WinitCefApp<T> {
       self.remove_scheme_handler_entries(child);
       child.close();
     }
+    #[cfg(all(target_os = "linux", feature = "native-wayland"))]
+    appwindow.close_native_wayland();
     self.exit_if_done(event_loop);
   }
 
@@ -922,6 +934,8 @@ impl<T: UserEvent> WinitCefApp<T> {
         self.remove_scheme_handler_entries(child);
         child.close();
       }
+      #[cfg(all(target_os = "linux", feature = "native-wayland"))]
+      appwindow.close_native_wayland();
     }
     self.state.windows.clear();
     self.state.winid_id_to_window_id_map.clear();
@@ -963,13 +977,38 @@ impl<T: UserEvent> WinitCefApp<T> {
     target_os = "netbsd",
     target_os = "openbsd"
   ))]
-  fn service_glib(&self, event_loop: &dyn ActiveEventLoop) {
+  fn service_glib(&mut self, event_loop: &dyn ActiveEventLoop) {
+    let tick_started = std::time::Instant::now();
     let context = gtk::glib::MainContext::default();
+    let mut glib_iterations = 0;
     while context.pending() {
       context.iteration(false);
+      glib_iterations += 1;
+    }
+    let glib_elapsed = tick_started.elapsed();
+
+    let cef_started = std::time::Instant::now();
+    cef::do_message_loop_work();
+    let cef_elapsed = cef_started.elapsed();
+
+    #[cfg(target_os = "linux")]
+    {
+      let tick_elapsed = tick_started.elapsed();
+      let now = std::time::Instant::now();
+      if crate::config::native_wayland()
+        && tick_elapsed >= SLOW_CEF_TICK
+        && self
+          .last_slow_cef_tick_log
+          .is_none_or(|last| now.duration_since(last) >= SLOW_CEF_TICK_LOG_INTERVAL)
+      {
+        self.last_slow_cef_tick_log = Some(now);
+        log::warn!(
+          "slow native Wayland CEF tick: total={tick_elapsed:?}, glib={glib_elapsed:?} \
+           ({glib_iterations} iterations), cef={cef_elapsed:?}"
+        );
+      }
     }
 
-    cef::do_message_loop_work();
     event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
       std::time::Instant::now() + CEF_WORK_INTERVAL,
     ));

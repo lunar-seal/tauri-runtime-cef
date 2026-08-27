@@ -3,8 +3,6 @@
 // SPDX-License-Identifier: MIT
 
 use cef::ImplBrowserHost;
-#[cfg(feature = "native-wayland")]
-use cef::ImplView;
 use std::os::raw::c_ulong;
 use tauri_runtime::dpi::{PhysicalPosition, PhysicalSize, Rect};
 use tauri_utils::config::Color;
@@ -23,11 +21,8 @@ impl AppWebview {
 
   pub(crate) fn set_background_color(&self, color: Option<Color>) {
     #[cfg(feature = "native-wayland")]
-    if let Some(native) = &self.native_wayland {
-      let (r, g, b, a) = color.unwrap_or_default().into();
-      native.browser_view.set_background_color(
-        ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | b as u32,
-      );
+    if crate::config::native_wayland() {
+      self.native_wayland_set_background_color(color);
       return;
     }
     let _ = (self, color);
@@ -37,21 +32,8 @@ impl AppWebview {
 
   pub(crate) fn bounds(&self) -> Option<Rect> {
     #[cfg(feature = "native-wayland")]
-    if let Some(native) = &self.native_wayland {
-      let bounds = native.browser_view.bounds();
-      let scale = native.scale_factor();
-      return Some(Rect {
-        position: PhysicalPosition::new(
-          (bounds.x as f64 * scale).round() as i32,
-          (bounds.y as f64 * scale).round() as i32,
-        )
-        .into(),
-        size: PhysicalSize::new(
-          (bounds.width.max(0) as f64 * scale).round() as u32,
-          (bounds.height.max(0) as f64 * scale).round() as u32,
-        )
-        .into(),
-      });
+    if crate::config::native_wayland() {
+      return self.native_wayland_bounds();
     }
     let xid = self.xid();
 
@@ -94,8 +76,8 @@ impl AppWebview {
   /// `CefWindowX11::Focus`; Chrome-style child windows have no equivalent.
   pub(crate) fn take_input_focus(&self) {
     #[cfg(feature = "native-wayland")]
-    if let Some(native) = &self.native_wayland {
-      native.browser_view.request_focus();
+    if crate::config::native_wayland() {
+      self.native_wayland_take_input_focus();
       return;
     }
     let xid = self.xid();
@@ -115,7 +97,7 @@ impl AppWebview {
 
   pub(crate) fn reparent(&self, parent: &AppWindow) {
     #[cfg(feature = "native-wayland")]
-    if self.native_wayland.is_some() {
+    if crate::config::native_wayland() {
       return;
     }
     let xid = self.xid();
@@ -129,8 +111,8 @@ impl AppWebview {
 
   pub(crate) fn apply_visible(&self, visible: bool) {
     #[cfg(feature = "native-wayland")]
-    if let Some(native) = &self.native_wayland {
-      native.browser_view.set_visible(i32::from(visible));
+    if crate::config::native_wayland() {
+      self.native_wayland_set_visible(visible);
       return;
     }
     let xid = self.xid();
@@ -170,8 +152,7 @@ impl AppWebview {
 
   pub(crate) fn destroy_native(&self) {
     #[cfg(feature = "native-wayland")]
-    if let Some(native) = &self.native_wayland {
-      native.force_close();
+    if crate::config::native_wayland() {
       return;
     }
     let xid = self.xid();
@@ -183,14 +164,8 @@ impl AppWebview {
 
   pub(crate) fn apply_physical_bounds(&self, _scale: f64, x: i32, y: i32, width: i32, height: i32) {
     #[cfg(feature = "native-wayland")]
-    if let Some(native) = &self.native_wayland {
-      let scale = native.scale_factor();
-      native.browser_view.set_bounds(Some(&cef::Rect {
-        x: (x as f64 / scale).round() as i32,
-        y: (y as f64 / scale).round() as i32,
-        width: (width.max(1) as f64 / scale).round() as i32,
-        height: (height.max(1) as f64 / scale).round() as i32,
-      }));
+    if crate::config::native_wayland() {
+      self.native_wayland_set_bounds(x, y, width, height);
       return;
     }
     let xid = self.xid();

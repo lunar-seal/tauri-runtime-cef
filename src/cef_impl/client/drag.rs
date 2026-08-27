@@ -220,6 +220,39 @@ pub(crate) fn event_from_script_event(
   }
 }
 
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn file_drop_follows_tauri_event_sequence() {
+    let state = Arc::new(Mutex::new(DragDropState {
+      paths: Some(vec![PathBuf::from("/tmp/file")]),
+      native_entered: true,
+      entered: false,
+    }));
+    let event = |kind: &str| DragDropScriptEvent {
+      kind: kind.into(),
+      x: 4.0,
+      y: 8.0,
+    };
+
+    assert!(matches!(
+      event_from_script_event(&state, event("enter")),
+      Some(DragDropEvent::Enter { .. })
+    ));
+    assert!(matches!(
+      event_from_script_event(&state, event("over")),
+      Some(DragDropEvent::Over { .. })
+    ));
+    assert!(matches!(
+      event_from_script_event(&state, event("drop")),
+      Some(DragDropEvent::Drop { .. })
+    ));
+    assert!(!state.lock().unwrap().native_entered);
+  }
+}
+
 wrap_resource_request_handler! {
   pub(crate) struct WebDragDropResourceRequestHandler<T: UserEvent> {
     context: RuntimeContext<T>,

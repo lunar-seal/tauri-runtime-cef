@@ -1,12 +1,12 @@
-// Copyright 2019-2024 Tauri Programme within The Commons Conservancy
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-License-Identifier: MIT
-
-//! Native Wayland top-level window backed by CEF Views.
+//! Use the CEF Views Framework to create a native Wayland window.
+//! This is not embeddable into a native window owned by us.
 //!
-//! CEF cannot embed a native browser child into a foreign Wayland window. The
-//! supported native path is the one used by `cefsimple`: CEF owns the
-//! `CefWindow`, with a `CefBrowserView` filling it.
+//! Reference: https://github.com/chromiumembedded/cef/tree/master/tests/cefsimple
+
+mod drag;
+mod webview;
+
+pub(crate) use drag::drag_region_initialization_script;
 
 use std::sync::{
   Arc, Mutex,
@@ -17,7 +17,6 @@ use cef::{rc::Rc, *};
 use tauri_runtime::{
   Error, UserEvent,
   dpi::{PhysicalPosition, PhysicalSize, Size as TauriSize},
-  webview::InitializationScript,
   window::WindowId,
 };
 use winit::window::WindowLevel;
@@ -27,68 +26,10 @@ use crate::{
   window::{AppWindow, AppWindowAttrs, WindowMessage},
 };
 
+use drag::DraggableRegions;
+
 type BrowserCreated = Box<dyn FnOnce(Browser, NativeWindow)>;
 type Emit = Arc<dyn Fn(Event) + Send + Sync>;
-
-const DRAG_REGION_SCRIPT: &str = r#"
-(() => {
-  const style = document.createElement("style");
-  style.textContent = `
-    [data-tauri-drag-region]:not([data-tauri-drag-region="false"]) {
-      -webkit-app-region: drag;
-    }
-    [data-tauri-drag-region]:not([data-tauri-drag-region="deep"]) * {
-      -webkit-app-region: no-drag;
-    }
-    [data-tauri-drag-region="false"],
-    [data-tauri-drag-region="deep"] :is(a, button, input, select, textarea, label, summary,
-      [contenteditable]:not([contenteditable="false"]), [tabindex]:not([tabindex="-1"]),
-      [role="button"], [role="link"], [role="menuitem"], [role="tab"], [role="checkbox"],
-      [role="radio"], [role="switch"], [role="option"]):not([data-tauri-drag-region]) {
-      -webkit-app-region: no-drag;
-    }
-  `;
-  (document.head || document.documentElement).append(style);
-})();
-"#;
-
-pub(crate) fn drag_region_initialization_script() -> InitializationScript {
-  InitializationScript {
-    script: DRAG_REGION_SCRIPT.to_string(),
-    for_main_frame_only: false,
-  }
-}
-
-#[derive(Default)]
-struct DraggableRegionsState {
-  window: Option<Window>,
-  regions: Vec<DraggableRegion>,
-}
-
-#[derive(Clone, Default)]
-struct DraggableRegions(Arc<Mutex<DraggableRegionsState>>);
-
-impl DraggableRegions {
-  fn attach(&self, window: Window) {
-    let regions = {
-      let mut state = self.0.lock().unwrap();
-      state.window = Some(window.clone());
-      state.regions.clone()
-    };
-    window.set_draggable_regions((!regions.is_empty()).then_some(regions.as_slice()));
-  }
-
-  fn set(&self, regions: Option<&[DraggableRegion]>) {
-    let (window, regions) = {
-      let mut state = self.0.lock().unwrap();
-      state.regions = regions.unwrap_or_default().to_vec();
-      (state.window.clone(), state.regions.clone())
-    };
-    if let Some(window) = window {
-      window.set_draggable_regions((!regions.is_empty()).then_some(regions.as_slice()));
-    }
-  }
-}
 
 #[derive(Clone)]
 struct WindowState {
@@ -190,8 +131,7 @@ impl WindowConfig {
   pub(crate) fn draggable_regions_changed(
     &self,
   ) -> crate::cef_impl::client::DraggableRegionsChanged {
-    let draggable_regions = self.draggable_regions.clone();
-    Arc::new(move |regions| draggable_regions.set(regions))
+    self.draggable_regions.changed_handler()
   }
 
   pub(crate) fn is_frameless(&self) -> bool {
@@ -199,30 +139,37 @@ impl WindowConfig {
   }
 }
 
-#[derive(Clone)]
 pub(crate) struct NativeWindow {
-  pub(crate) window: Window,
-  pub(crate) browser_view: BrowserView,
+  window: Window,
+  browser_view: BrowserView,
   allow_close: Arc<AtomicBool>,
   state: Arc<Mutex<WindowState>>,
 }
 
 impl NativeWindow {
-  pub(crate) fn force_close(&self) {
+  fn force_close(&self) {
     self.allow_close.store(true, Ordering::Release);
     self.window.close();
   }
 
-  pub(crate) fn scale_factor(&self) -> f64 {
+  fn scale_factor(&self) -> f64 {
     scale_factor(&self.window)
   }
 
-  pub(crate) fn physical_bounds(&self) -> (PhysicalPosition<i32>, PhysicalSize<u32>) {
+  fn physical_bounds(&self) -> (PhysicalPosition<i32>, PhysicalSize<u32>) {
     physical_bounds(self.window.bounds_in_screen())
   }
 
-  pub(crate) fn physical_inner_size(&self) -> PhysicalSize<u32> {
+  fn physical_inner_size(&self) -> PhysicalSize<u32> {
     physical_bounds(self.window.client_area_bounds_in_screen()).1
+  }
+}
+
+impl AppWindow {
+  pub(crate) fn close_native_wayland(&self) {
+    if let Some(native) = &self.native_wayland {
+      native.force_close();
+    }
   }
 }
 
@@ -230,11 +177,7 @@ pub(crate) fn handle_window_message(
   appwindow: &mut AppWindow,
   message: WindowMessage,
 ) -> Option<WindowMessage> {
-  let native = appwindow
-    .children
-    .first()
-    .and_then(|child| child.native_wayland.clone());
-  let Some(native) = native else {
+  let Some(native) = appwindow.native_wayland.as_ref() else {
     return Some(message);
   };
   let window = &native.window;
@@ -413,9 +356,6 @@ wrap_browser_view_delegate! {
       let (Some(browser_view), Some(browser)) = (browser_view, browser) else {
         return;
       };
-      // Chrome-style Views creates its internal WebView after applying defaults.
-      // Reapply the color now so CEF also uses it behind clipped resize frames.
-      browser_view.set_background_color(browser_view.background_color());
       if let Some(on_created) = self.on_created.lock().unwrap().take() {
         let Some(window) = browser_view.window() else {
           log::error!("native Wayland browser view has no CEF window");
@@ -638,19 +578,4 @@ fn view_scale_factor(view: Option<&mut View>, fallback: f64) -> f64 {
     .as_ref()
     .map(scale_factor)
     .unwrap_or(fallback)
-}
-
-#[cfg(test)]
-mod tests {
-  use super::*;
-  use tauri_runtime::dpi::LogicalSize;
-
-  #[test]
-  fn cef_sizes_stay_in_device_independent_pixels() {
-    let physical = cef_size(PhysicalSize::new(300, 180), 1.5);
-    assert_eq!((physical.width, physical.height), (200, 120));
-
-    let logical = cef_size_from_tauri(TauriSize::Logical(LogicalSize::new(200.0, 120.0)), 1.5);
-    assert_eq!((logical.width, logical.height), (200, 120));
-  }
 }

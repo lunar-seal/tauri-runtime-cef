@@ -198,8 +198,12 @@ pub(crate) struct AppWebview {
   pub(crate) devtools_observer_registration: Arc<Mutex<Option<cef::Registration>>>,
   pub(crate) listeners: WebviewEventListeners,
   pub(crate) bounds_rate: Option<BoundsRate>,
+}
+
+struct BrowserChild {
+  webview: AppWebview,
   #[cfg(all(target_os = "linux", feature = "native-wayland"))]
-  pub(crate) native_wayland: Option<crate::native_wayland::NativeWindow>,
+  native_wayland: Option<crate::native_wayland::NativeWindow>,
 }
 
 impl AppWebview {
@@ -335,7 +339,11 @@ impl<T: UserEvent> WinitCefApp<T> {
     };
 
     *live_browsers += 1;
-    appwindow.children.push(child);
+    #[cfg(all(target_os = "linux", feature = "native-wayland"))]
+    {
+      appwindow.native_wayland = child.native_wayland;
+    }
+    appwindow.children.push(child.webview);
     layout_app_window(appwindow);
     // No winit focus event is coming for a window that is already focused.
     if appwindow.reported_focus
@@ -347,7 +355,7 @@ impl<T: UserEvent> WinitCefApp<T> {
     Ok(())
   }
 
-  pub(crate) fn build_browser_child(
+  fn build_browser_child(
     context: &RuntimeContext<T>,
     scheme_registry: &request_handler::SchemeRegistry,
     window_id: WindowId,
@@ -361,7 +369,7 @@ impl<T: UserEvent> WinitCefApp<T> {
       crate::native_wayland::WindowConfig,
     >,
     mut pending: PendingWebview<T, CefRuntime<T>>,
-  ) -> Option<AppWebview> {
+  ) -> Option<BrowserChild> {
     let bounds_rate = compute_child_bounds_rate(
       pending.webview_attributes.bounds.as_ref(),
       pending.webview_attributes.auto_resize,
@@ -535,17 +543,19 @@ impl<T: UserEvent> WinitCefApp<T> {
           );
 
           browser_tx
-            .send(AppWebview {
-              webview_id,
-              label,
-              browser,
-              browser_id,
-              host,
-              uri_scheme_protocols,
-              devtools_protocol_handlers,
-              devtools_observer_registration,
-              listeners: Default::default(),
-              bounds_rate,
+            .send(BrowserChild {
+              webview: AppWebview {
+                webview_id,
+                label,
+                browser,
+                browser_id,
+                host,
+                uri_scheme_protocols,
+                devtools_protocol_handlers,
+                devtools_observer_registration,
+                listeners: Default::default(),
+                bounds_rate,
+              },
               #[cfg(all(target_os = "linux", feature = "native-wayland"))]
               native_wayland,
             })
@@ -694,6 +704,8 @@ impl<T: UserEvent> WinitCefApp<T> {
         // runs. Leaving it attached leaks the renderer; letting CEF forward a
         // close to its top-level parent can close the whole Tauri window.
         child.close();
+        #[cfg(all(target_os = "linux", feature = "native-wayland"))]
+        appwindow.close_native_wayland();
       }
       WebviewMessage::SetBounds(bounds) => {
         let parent_size = appwindow.window.surface_size();
@@ -1314,11 +1326,7 @@ impl<T: UserEvent> WebviewDispatch<T> for CefWebviewDispatcher<T> {
 /// they were last given.
 pub(crate) fn layout_app_window(appwindow: &AppWindow) {
   #[cfg(all(target_os = "linux", feature = "native-wayland"))]
-  if appwindow
-    .children
-    .first()
-    .is_some_and(|child| child.native_wayland.is_some())
-  {
+  if appwindow.native_wayland.is_some() {
     return;
   }
   let parent_size = appwindow.window.surface_size();
