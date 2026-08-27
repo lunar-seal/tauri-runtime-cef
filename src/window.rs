@@ -328,8 +328,6 @@ pub(crate) struct AppWindow {
   pub(crate) window: Box<dyn WinitWindow>,
   pub(crate) attrs: AppWindowAttrs,
   pub(crate) children: Vec<AppWebview>,
-  #[cfg(all(target_os = "linux", feature = "native-wayland"))]
-  pub(crate) native_wayland: Option<crate::native_wayland::NativeWindow>,
   pub(crate) listeners: WindowEventListeners,
   /// Last focus state reported to Tauri. See `WinitCefApp::sync_window_focus`.
   pub(crate) reported_focus: bool,
@@ -424,13 +422,6 @@ impl<T: UserEvent> WinitCefApp<T> {
     pending: Box<PendingWindow<T, CefRuntime<T>>>,
     _after_window_creation: Option<AfterWindowCreationCallback>,
   ) -> Result<()> {
-    #[cfg(target_os = "linux")]
-    let native_wayland = crate::config::native_wayland();
-    #[cfg(target_os = "linux")]
-    if native_wayland && !self.state.windows.is_empty() {
-      return Err(Error::CreateWindow);
-    }
-
     let mut attrs = pending.window_builder.attrs.clone();
     if attrs.inner.preferred_theme.is_none() {
       attrs.inner.preferred_theme =
@@ -438,15 +429,8 @@ impl<T: UserEvent> WinitCefApp<T> {
     }
     prepare_window_attributes(event_loop, &mut attrs);
 
-    let mut control_attrs = attrs.inner.clone();
-    #[cfg(target_os = "linux")]
-    if native_wayland {
-      // CEF Views owns the visible top-level; winit remains an invisible
-      // event-loop and monitor provider for Tauri's runtime contract.
-      control_attrs.visible = false;
-    }
     let window = event_loop
-      .create_window(control_attrs)
+      .create_window(attrs.inner.clone())
       .map_err(|_| Error::CreateWindow)?;
 
     let winit_id = window.id();
@@ -458,8 +442,6 @@ impl<T: UserEvent> WinitCefApp<T> {
       window,
       attrs,
       children: Vec::new(),
-      #[cfg(all(target_os = "linux", feature = "native-wayland"))]
-      native_wayland: None,
       listeners: Default::default(),
       reported_focus: false,
       #[cfg(target_os = "macos")]
@@ -475,13 +457,8 @@ impl<T: UserEvent> WinitCefApp<T> {
       }
     }
 
-    #[cfg(target_os = "linux")]
-    if !native_wayland {
-      appwindow.set_visible_on_all_workspaces(appwindow.attrs.visible_on_all_workspaces);
-      appwindow.set_skip_taskbar(appwindow.attrs.skip_taskbar);
-    }
-
     #[cfg(any(
+      target_os = "linux",
       target_os = "dragonfly",
       target_os = "freebsd",
       target_os = "netbsd",
@@ -497,12 +474,7 @@ impl<T: UserEvent> WinitCefApp<T> {
       appwindow.draw_background_surface();
     }
 
-    #[cfg(target_os = "linux")]
-    if appwindow.attrs.background_color.is_some() && !native_wayland {
-      appwindow.set_background_color(appwindow.attrs.background_color);
-    }
-
-    #[cfg(all(not(windows), not(target_os = "linux")))]
+    #[cfg(not(windows))]
     if appwindow.attrs.background_color.is_some() {
       appwindow.set_background_color(appwindow.attrs.background_color);
     }
@@ -531,14 +503,6 @@ impl<T: UserEvent> WinitCefApp<T> {
       )?;
     }
 
-    #[cfg(target_os = "linux")]
-    if !native_wayland {
-      self
-        .state
-        .winid_id_to_window_id_map
-        .insert(winit_id, window_id);
-    }
-    #[cfg(not(target_os = "linux"))]
     self
       .state
       .winid_id_to_window_id_map
@@ -568,10 +532,6 @@ impl<T: UserEvent> WinitCefApp<T> {
     }
 
     let Some(appwindow) = self.state.windows.get_mut(&window_id) else {
-      return;
-    };
-    #[cfg(all(target_os = "linux", feature = "native-wayland"))]
-    let Some(message) = crate::native_wayland::handle_window_message(appwindow, message) else {
       return;
     };
     let window = &appwindow.window;

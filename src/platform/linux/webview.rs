@@ -20,21 +20,12 @@ impl AppWebview {
   }
 
   pub(crate) fn set_background_color(&self, color: Option<Color>) {
-    #[cfg(feature = "native-wayland")]
-    if crate::config::native_wayland() {
-      self.native_wayland_set_background_color(color);
-      return;
-    }
     let _ = (self, color);
     // Native child-window background is not equivalent to Chromium's rendered
     // background. Creation still applies BrowserSettings.
   }
 
   pub(crate) fn bounds(&self) -> Option<Rect> {
-    #[cfg(feature = "native-wayland")]
-    if crate::config::native_wayland() {
-      return self.native_wayland_bounds();
-    }
     let xid = self.xid();
 
     with_cef_display(None, |xlib, display| unsafe {
@@ -75,11 +66,6 @@ impl AppWebview {
   /// with neither focus nor pointer as inactive. Alloy does this in
   /// `CefWindowX11::Focus`; Chrome-style child windows have no equivalent.
   pub(crate) fn take_input_focus(&self) {
-    #[cfg(feature = "native-wayland")]
-    if crate::config::native_wayland() {
-      self.native_wayland_take_input_focus();
-      return;
-    }
     let xid = self.xid();
 
     with_cef_display((), |xlib, display| unsafe {
@@ -96,10 +82,6 @@ impl AppWebview {
   }
 
   pub(crate) fn reparent(&self, parent: &AppWindow) {
-    #[cfg(feature = "native-wayland")]
-    if crate::config::native_wayland() {
-      return;
-    }
     let xid = self.xid();
     let parent_xid = parent.xid();
 
@@ -110,11 +92,6 @@ impl AppWebview {
   }
 
   pub(crate) fn apply_visible(&self, visible: bool) {
-    #[cfg(feature = "native-wayland")]
-    if crate::config::native_wayland() {
-      self.native_wayland_set_visible(visible);
-      return;
-    }
     let xid = self.xid();
 
     with_cef_display((), |xlib, display| unsafe {
@@ -151,10 +128,6 @@ impl AppWebview {
   }
 
   pub(crate) fn destroy_native(&self) {
-    #[cfg(feature = "native-wayland")]
-    if crate::config::native_wayland() {
-      return;
-    }
     let xid = self.xid();
     with_cef_display((), |xlib, display| unsafe {
       (xlib.XDestroyWindow)(display, xid);
@@ -163,11 +136,6 @@ impl AppWebview {
   }
 
   pub(crate) fn apply_physical_bounds(&self, _scale: f64, x: i32, y: i32, width: i32, height: i32) {
-    #[cfg(feature = "native-wayland")]
-    if crate::config::native_wayland() {
-      self.native_wayland_set_bounds(x, y, width, height);
-      return;
-    }
     let xid = self.xid();
 
     with_cef_display((), |xlib, display| unsafe {

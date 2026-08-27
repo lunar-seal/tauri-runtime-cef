@@ -8,7 +8,6 @@ use std::{
   sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
-    mpsc::{Receiver, TryRecvError},
   },
   time::Duration,
 };
@@ -172,24 +171,6 @@ pub(crate) fn wait_for_deferred_init(flag: &Arc<AtomicBool>) {
   }
 }
 
-/// Wait for an asynchronously-created CEF object while continuing to service
-/// the CEF UI thread. Views creates its browser only after the BrowserView is
-/// attached to a Window, unlike `browser_host_create_browser_sync`.
-pub(crate) fn wait_for_deferred_result<T>(receiver: &Receiver<T>) -> Option<T> {
-  if cef::currently_on(cef::sys::cef_thread_id_t::TID_UI.into()) == 0 {
-    return receiver.recv().ok();
-  }
-
-  let _allow = AllowNestableTasks::enter();
-  loop {
-    match receiver.try_recv() {
-      Ok(value) => return Some(value),
-      Err(TryRecvError::Disconnected) => return None,
-      Err(TryRecvError::Empty) => cef::do_message_loop_work(),
-    }
-  }
-}
-
 /// RAII guard that scopes `CefSetNestableTasksAllowed(true)` for the current
 /// CEF UI-thread call.
 ///
@@ -199,10 +180,10 @@ pub(crate) fn wait_for_deferred_result<T>(receiver: &Receiver<T>) -> Option<T> {
 /// [`wait_for_deferred_init`] on this thread toggles the flag, which makes
 /// nesting (e.g. an `on_initialized` continuation that creates another
 /// webview) safe.
-struct AllowNestableTasks;
+pub(crate) struct AllowNestableTasks;
 
 impl AllowNestableTasks {
-  fn enter() -> Self {
+  pub(crate) fn enter() -> Self {
     NESTABLE_TASKS_DEPTH.with(|depth| {
       let current = depth.get();
       if current == 0 {

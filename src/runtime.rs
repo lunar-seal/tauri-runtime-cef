@@ -115,7 +115,8 @@ pub(crate) struct RuntimeContext<T: UserEvent> {
 /// treated as valid beyond their callback.
 #[derive(Clone, Copy)]
 struct MainThreadDispatch<T: UserEvent> {
-  app: *mut WinitCefApp<T>,
+  app: *mut (),
+  handle: unsafe fn(*mut (), &dyn ActiveEventLoop, Message<T>),
   event_loop: *const dyn ActiveEventLoop,
 }
 
@@ -156,7 +157,7 @@ impl<T: UserEvent> Default for MainThreadDispatchSlot<T> {
   }
 }
 
-struct MainThreadDispatchGuard<T: UserEvent> {
+pub(crate) struct MainThreadDispatchGuard<T: UserEvent> {
   context: RuntimeContext<T>,
   dispatch: Box<MainThreadDispatch<T>>,
   previous: *mut MainThreadDispatch<T>,
@@ -180,13 +181,11 @@ fn handle_main_thread_message<T: UserEvent>(
     return Err(message);
   };
 
-  // SAFETY: `WinitCefApp::install_current_dispatch` stores pointers to the currently
-  // executing winit application handler and event-loop callback. This function
-  // is only called on the runtime main thread while that callback is active.
-  let app = unsafe { &mut *dispatch.app };
+  // SAFETY: `install_current_dispatch` stores the currently executing application
+  // handler and event-loop callback. This only runs on the runtime main thread
+  // while that callback is active.
   let event_loop = unsafe { &*dispatch.event_loop };
-
-  app.handle_message(event_loop, message);
+  unsafe { (dispatch.handle)(dispatch.app, event_loop, message) };
 
   Ok(())
 }
@@ -198,6 +197,25 @@ impl<T: UserEvent> fmt::Debug for RuntimeContext<T> {
 }
 
 impl<T: UserEvent> RuntimeContext<T> {
+  pub(crate) fn install_current_dispatch(
+    &self,
+    app: *mut (),
+    handle: unsafe fn(*mut (), &dyn ActiveEventLoop, Message<T>),
+    event_loop: &dyn ActiveEventLoop,
+  ) -> MainThreadDispatchGuard<T> {
+    let mut dispatch = Box::new(MainThreadDispatch {
+      app,
+      handle,
+      event_loop: event_loop as *const _,
+    });
+    let previous = self.current_dispatch.install(dispatch.as_mut());
+    MainThreadDispatchGuard {
+      context: self.clone(),
+      dispatch,
+      previous,
+    }
+  }
+
   pub(crate) fn send_message(&self, message: Message<T>) -> Result<()> {
     let message = if self.is_main_thread() {
       match handle_main_thread_message(self, message) {
@@ -260,8 +278,6 @@ pub(crate) type AfterWindowCreationCallback = Box<dyn for<'a> Fn(RawWindow<'a>) 
 pub(crate) enum Message<T: UserEvent> {
   EventLoop(EventLoopMessage),
   BrowserClosed(WindowId, u32),
-  #[cfg(all(target_os = "linux", feature = "native-wayland"))]
-  NativeWaylandWindow(WindowId, crate::native_wayland::Event),
   Opened(Vec<url::Url>),
   #[cfg(target_os = "macos")]
   Reopen {
@@ -407,8 +423,6 @@ pub(crate) struct WinitCefApp<T: UserEvent> {
     target_os = "openbsd"
   ))]
   last_focus_probe: Option<std::time::Instant>,
-  #[cfg(target_os = "linux")]
-  last_slow_cef_tick_log: Option<std::time::Instant>,
 }
 
 /// Stands in for the scheduling callbacks `external_message_pump` would provide.
@@ -420,12 +434,6 @@ pub(crate) struct WinitCefApp<T: UserEvent> {
   target_os = "openbsd"
 ))]
 const CEF_WORK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(4);
-
-#[cfg(target_os = "linux")]
-const SLOW_CEF_TICK: std::time::Duration = std::time::Duration::from_millis(8);
-
-#[cfg(target_os = "linux")]
-const SLOW_CEF_TICK_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Probing costs blocking X round-trips and focus is not that time-sensitive.
 #[cfg(any(
@@ -465,8 +473,6 @@ impl<T: UserEvent> WinitCefApp<T> {
         target_os = "openbsd"
       ))]
       last_focus_probe: None,
-      #[cfg(target_os = "linux")]
-      last_slow_cef_tick_log: None,
     }
   }
 
@@ -478,18 +484,18 @@ impl<T: UserEvent> WinitCefApp<T> {
     &mut self,
     event_loop: &dyn ActiveEventLoop,
   ) -> MainThreadDispatchGuard<T> {
-    let mut dispatch = Box::new(MainThreadDispatch {
-      app: self as *mut _,
-      event_loop: event_loop as *const _,
-    });
-
-    let previous = self.context.current_dispatch.install(dispatch.as_mut());
-
-    MainThreadDispatchGuard {
-      context: self.context.clone(),
-      dispatch,
-      previous,
+    unsafe fn handle<T: UserEvent>(
+      app: *mut (),
+      event_loop: &dyn ActiveEventLoop,
+      message: Message<T>,
+    ) {
+      unsafe { &mut *app.cast::<WinitCefApp<T>>() }.handle_message(event_loop, message);
     }
+
+    let app = (self as *mut Self).cast();
+    self
+      .context
+      .install_current_dispatch(app, handle::<T>, event_loop)
   }
 
   fn drain_messages(&mut self, event_loop: &dyn ActiveEventLoop) {
@@ -525,10 +531,6 @@ impl<T: UserEvent> WinitCefApp<T> {
 
         self.state.live_browsers = self.state.live_browsers.saturating_sub(1);
         self.exit_if_done(event_loop);
-      }
-      #[cfg(all(target_os = "linux", feature = "native-wayland"))]
-      Message::NativeWaylandWindow(window_id, event) => {
-        self.handle_native_wayland_event(window_id, event, event_loop)
       }
       Message::CreateWindow {
         window_id,
@@ -712,11 +714,6 @@ impl<T: UserEvent> WinitCefApp<T> {
   /// winit already considers the top-level unfocused once the browser child holds
   /// the focus, so it drops the `FocusOut` for a real loss. The loop still wakes.
   fn sync_delegated_focus(&mut self) {
-    #[cfg(target_os = "linux")]
-    if crate::config::native_wayland() {
-      return;
-    }
-
     #[cfg(any(
       target_os = "linux",
       target_os = "dragonfly",
@@ -744,51 +741,6 @@ impl<T: UserEvent> WinitCefApp<T> {
 
     for window_id in delegated {
       self.sync_window_focus(window_id);
-    }
-  }
-
-  #[cfg(all(target_os = "linux", feature = "native-wayland"))]
-  fn handle_native_wayland_event(
-    &mut self,
-    window_id: WindowId,
-    event: crate::native_wayland::Event,
-    event_loop: &dyn ActiveEventLoop,
-  ) {
-    match event {
-      crate::native_wayland::Event::CloseRequested => {
-        self.request_window_close(window_id, event_loop)
-      }
-      crate::native_wayland::Event::Destroyed => {
-        self.close_window(window_id, event_loop);
-      }
-      crate::native_wayland::Event::Focused(focused) => {
-        let Some(appwindow) = self.state.windows.get_mut(&window_id) else {
-          return;
-        };
-        if appwindow.reported_focus != focused {
-          appwindow.reported_focus = focused;
-          for child in &appwindow.children {
-            child.host.set_focus(i32::from(focused));
-          }
-          if focused && let Some(child) = appwindow.children.first() {
-            child.take_input_focus();
-          }
-          self.emit_window_event(window_id, WindowEvent::Focused(focused));
-        }
-      }
-      crate::native_wayland::Event::Resized(size) => {
-        self.emit_window_event(window_id, WindowEvent::Resized(size));
-      }
-      crate::native_wayland::Event::ScaleFactorChanged {
-        scale_factor,
-        new_inner_size,
-      } => self.emit_window_event(
-        window_id,
-        WindowEvent::ScaleFactorChanged {
-          scale_factor,
-          new_inner_size,
-        },
-      ),
     }
   }
 
@@ -881,10 +833,8 @@ impl<T: UserEvent> WinitCefApp<T> {
     // shutdown drain is still enforced by live_browsers.
     for child in &appwindow.children {
       self.remove_scheme_handler_entries(child);
-      child.close();
+      child.host.close_browser(1);
     }
-    #[cfg(all(target_os = "linux", feature = "native-wayland"))]
-    appwindow.close_native_wayland();
     self.exit_if_done(event_loop);
   }
 
@@ -932,10 +882,8 @@ impl<T: UserEvent> WinitCefApp<T> {
     for appwindow in self.state.windows.values() {
       for child in &appwindow.children {
         self.remove_scheme_handler_entries(child);
-        child.close();
+        child.host.close_browser(1);
       }
-      #[cfg(all(target_os = "linux", feature = "native-wayland"))]
-      appwindow.close_native_wayland();
     }
     self.state.windows.clear();
     self.state.winid_id_to_window_id_map.clear();
@@ -977,38 +925,13 @@ impl<T: UserEvent> WinitCefApp<T> {
     target_os = "netbsd",
     target_os = "openbsd"
   ))]
-  fn service_glib(&mut self, event_loop: &dyn ActiveEventLoop) {
-    let tick_started = std::time::Instant::now();
+  fn service_glib(&self, event_loop: &dyn ActiveEventLoop) {
     let context = gtk::glib::MainContext::default();
-    let mut glib_iterations = 0;
     while context.pending() {
       context.iteration(false);
-      glib_iterations += 1;
     }
-    let glib_elapsed = tick_started.elapsed();
 
-    let cef_started = std::time::Instant::now();
     cef::do_message_loop_work();
-    let cef_elapsed = cef_started.elapsed();
-
-    #[cfg(target_os = "linux")]
-    {
-      let tick_elapsed = tick_started.elapsed();
-      let now = std::time::Instant::now();
-      if crate::config::native_wayland()
-        && tick_elapsed >= SLOW_CEF_TICK
-        && self
-          .last_slow_cef_tick_log
-          .is_none_or(|last| now.duration_since(last) >= SLOW_CEF_TICK_LOG_INTERVAL)
-      {
-        self.last_slow_cef_tick_log = Some(now);
-        log::warn!(
-          "slow native Wayland CEF tick: total={tick_elapsed:?}, glib={glib_elapsed:?} \
-           ({glib_iterations} iterations), cef={cef_elapsed:?}"
-        );
-      }
-    }
-
     event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
       std::time::Instant::now() + CEF_WORK_INTERVAL,
     ));
@@ -1584,16 +1507,12 @@ impl<T: UserEvent> CefRuntime<T> {
     }
 
     #[cfg(target_os = "linux")]
-    match cef_config.linux_windowing {
-      crate::LinuxWindowing::X11 => {
-        command_line_args.push(("ozone-platform".to_string(), Some("x11".to_string())));
-        event_loop_builder.with_x11();
-      }
-      #[cfg(feature = "native-wayland")]
-      crate::LinuxWindowing::Wayland => {
-        command_line_args.push(("ozone-platform".to_string(), Some("wayland".to_string())));
-        event_loop_builder.with_wayland();
-      }
+    if crate::config::native_wayland() {
+      command_line_args.push(("ozone-platform".into(), Some("wayland".into())));
+      event_loop_builder.with_wayland();
+    } else {
+      command_line_args.push(("ozone-platform".into(), Some("x11".into())));
+      event_loop_builder.with_x11();
     }
 
     #[cfg(any(
@@ -1895,6 +1814,19 @@ impl<T: UserEvent> Runtime<T> for CefRuntime<T> {
 
   fn run_return<F: FnMut(RunEvent<T>) + 'static>(self, callback: F) -> i32 {
     let exit_code = Arc::new(std::sync::atomic::AtomicI32::new(0));
+    #[cfg(target_os = "linux")]
+    if crate::config::native_wayland() {
+      let app = crate::wayland::App::new(
+        self.context,
+        self.receiver,
+        Box::new(callback),
+        self.scheme_registry,
+        exit_code.clone(),
+      );
+      let _ = self.event_loop.run_app(app);
+      cef::shutdown();
+      return exit_code.load(Ordering::Acquire);
+    }
     let app = WinitCefApp::new(
       self.context,
       self.receiver,

@@ -18,8 +18,6 @@ use url::Url;
 
 use crate::runtime::{Message, RuntimeContext};
 
-pub(crate) type DraggableRegionsChanged = Arc<dyn Fn(Option<&[DraggableRegion]>)>;
-
 const DRAG_DROP_BRIDGE_PATH: &str = "/__tauri_cef_drag_drop__";
 
 const DRAG_DROP_INIT_SCRIPT: &str = r#"
@@ -143,7 +141,6 @@ fn collect_drag_data_paths(drag_data: &mut DragData) -> Vec<PathBuf> {
 wrap_drag_handler! {
   pub struct TauriCefDragHandler {
     drag_drop_state: Arc<Mutex<DragDropState>>,
-    draggable_regions_changed: Option<DraggableRegionsChanged>,
   }
 
   impl DragHandler {
@@ -163,17 +160,6 @@ wrap_drag_handler! {
       // Let Chromium continue with the drag operation so the injected script can
       // report over/drop/leave with accurate viewport positions.
       0
-    }
-
-    fn on_draggable_regions_changed(
-      &self,
-      _browser: Option<&mut Browser>,
-      _frame: Option<&mut Frame>,
-      regions: Option<&[DraggableRegion]>,
-    ) {
-      if let Some(handler) = &self.draggable_regions_changed {
-        handler(regions);
-      }
     }
   }
 }
@@ -217,39 +203,6 @@ pub(crate) fn event_from_script_event(
       }
     }
     _ => None,
-  }
-}
-
-#[cfg(test)]
-mod tests {
-  use super::*;
-
-  #[test]
-  fn file_drop_follows_tauri_event_sequence() {
-    let state = Arc::new(Mutex::new(DragDropState {
-      paths: Some(vec![PathBuf::from("/tmp/file")]),
-      native_entered: true,
-      entered: false,
-    }));
-    let event = |kind: &str| DragDropScriptEvent {
-      kind: kind.into(),
-      x: 4.0,
-      y: 8.0,
-    };
-
-    assert!(matches!(
-      event_from_script_event(&state, event("enter")),
-      Some(DragDropEvent::Enter { .. })
-    ));
-    assert!(matches!(
-      event_from_script_event(&state, event("over")),
-      Some(DragDropEvent::Over { .. })
-    ));
-    assert!(matches!(
-      event_from_script_event(&state, event("drop")),
-      Some(DragDropEvent::Drop { .. })
-    ));
-    assert!(!state.lock().unwrap().native_entered);
   }
 }
 

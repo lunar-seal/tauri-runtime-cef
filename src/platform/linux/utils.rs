@@ -16,13 +16,7 @@ const CLIENT_MESSAGE: i32 = 33;
 const SUBSTRUCTURE_REDIRECT_MASK: c_long = 1 << 20;
 const SUBSTRUCTURE_NOTIFY_MASK: c_long = 1 << 19;
 
-static XLIB: LazyLock<Option<xlib::Xlib>> = LazyLock::new(|| {
-  #[cfg(target_os = "linux")]
-  if crate::config::native_wayland() {
-    return None;
-  }
-  xlib::Xlib::open().ok()
-});
+static XLIB: LazyLock<Option<xlib::Xlib>> = LazyLock::new(|| xlib::Xlib::open().ok());
 
 struct Display(*mut xlib::Display);
 
@@ -114,6 +108,11 @@ unsafe extern "C" fn x_io_error_handler(_display: *mut xlib::Display) -> c_int {
 /// why cefclient installs its handlers *after* `gtk_init` rather than before.
 /// Calling this more than once is harmless.
 pub fn install_x_error_handlers() {
+  #[cfg(target_os = "linux")]
+  if crate::config::native_wayland() {
+    return;
+  }
+
   let Some(xlib) = XLIB.as_ref() else {
     return;
   };
