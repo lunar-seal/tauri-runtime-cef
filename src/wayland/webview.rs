@@ -281,7 +281,7 @@ pub(super) fn handle_message(
         0.0
       });
     }
-    WebviewMessage::SetBackgroundColor(_) => {},
+    WebviewMessage::SetBackgroundColor(_) => {}
     WebviewMessage::Url(tx) => _ = tx.send(Ok(child.url().unwrap_or_default())),
     WebviewMessage::Bounds(tx) => {
       _ = tx.send(Ok(Rect {

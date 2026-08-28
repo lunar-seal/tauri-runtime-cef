@@ -22,7 +22,6 @@ use crate::{
   window::{AppWindowAttrs, WindowMessage, winit_theme_to_tauri_theme},
 };
 
-
 type BrowserCreated = Box<dyn FnOnce(Browser, NativeWindow)>;
 type Emit = Arc<dyn Fn(Event) + Send + Sync>;
 
